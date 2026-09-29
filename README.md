@@ -6,7 +6,7 @@ Python 3.13.15, 표준 라이브러리만 쓴다.
 
 **2026-09-29: 실제 Host + 실제 Runner와 전체 왕복 성공** (`tools/e2e_host.py`, Host·Runner 소스 수정 없음).
 
-저장소: `github.com/b-hamo/sandbox_manager` (배주한·최정우 관리). Host(`host_control`)는 패키지로 설치해서 부른다.
+저장소: `github.com/b-hamo/sandbox_manager` (배주한 관리). Host(`host_control`)는 패키지로 설치해서 부른다.
 
 ```
 pip install git+https://github.com/b-hamo/sandbox_manager.git
