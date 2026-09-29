@@ -1,7 +1,7 @@
 """Run tools/e2e_host.py N times in a row and check nothing is left between runs (WBS 5.9).
 
 Run with the host_control venv Python (same as e2e_host.py):
-  python tools/repeat_e2e.py --runs 10
+  python tools/repeat_e2e.py --runs 10 [--host-repo <host_control> --runner <sandbox_runner.exe>]
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sandbox_manager.wsb import WsbCli  # noqa: E402
-from tools.e2e_host import DEFAULT_HOST_REPO  # noqa: E402
+from tools.e2e_host import DEFAULT_HOST_REPO, DEFAULT_RUNNER  # noqa: E402
 
 E2E = Path(__file__).with_name("e2e_host.py")
 
@@ -40,13 +40,15 @@ def leftovers(wsb: WsbCli, cert_dir: Path) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=10)
+    ap.add_argument("--host-repo", type=Path, default=DEFAULT_HOST_REPO)
+    ap.add_argument("--runner", type=Path, default=DEFAULT_RUNNER)
     args = ap.parse_args()
     wsb = WsbCli()
-    cert_dir = DEFAULT_HOST_REPO / "host" / ".certs"
+    cert_dir = args.host_repo / "host" / ".certs"
     rows = []
     for i in range(1, args.runs + 1):
         t0 = time.monotonic()
-        proc = subprocess.run([sys.executable, str(E2E)], capture_output=True, text=True, encoding="utf-8",
+        proc = subprocess.run([sys.executable, str(E2E), "--host-repo", str(args.host_repo), "--runner", str(args.runner)], capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=400)
         s = last_json(proc.stdout)
         t = s.get("timings", {})
