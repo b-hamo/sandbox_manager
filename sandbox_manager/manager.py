@@ -33,10 +33,12 @@ import os
 import re
 import shutil
 import ssl
+import threading
 import time
 from dataclasses import asdict, dataclass, field
+from functools import wraps
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypeVar
 
 from . import config
 from .errors import (INVALID_ARGUMENT, RUNTIME_START_FAILED, RUNTIME_UNAVAILABLE,
@@ -56,6 +58,25 @@ PREPARED, STARTING, STARTED, RUNNING, TERMINATED, FAILED = (
 def default_root() -> Path:
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     return Path(base) / "SecureCUA" / "sandbox-manager"
+
+
+F = TypeVar("F", bound=Callable)
+
+
+def _locked(fn: F) -> F:
+    """One call at a time per session (issue #3).
+
+    The Host calls this class from worker threads (asyncio.to_thread). Right after READY a session
+    can end, so mark_ready() and stop() may arrive together from two threads and interleave their
+    state.json writes. Reentrant: start() calls stop() itself when it fails.
+    A stop() that arrives while start() is still running waits for it; the Host does not do that
+    (host_control lifecycle.py waits for start() first).
+    """
+    @wraps(fn)
+    def wrapper(self: "SandboxManager", s: "SandboxSession", *args, **kwargs):
+        with self._lock_for(s.session_id):
+            return fn(self, s, *args, **kwargs)
+    return wrapper  # type: ignore[return-value]
 
 
 def _now() -> str:
@@ -134,10 +155,17 @@ class SandboxManager:
         self.firewall_wait_s = firewall_wait_s
         self.log = log or (lambda msg: None)
         self._t0: dict[str, float] = {}
+        self._locks: dict[str, threading.RLock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _lock_for(self, session_id: str) -> threading.RLock:
+        with self._locks_guard:
+            return self._locks.setdefault(session_id, threading.RLock())
 
     # ------------------------------------------------------------------ bookkeeping
     def _save(self, s: SandboxSession) -> None:
-        tmp = s.dir / "state.json.tmp"
+        # A name no other thread or process uses, so two writers never share one temp file.
+        tmp = s.dir / f"state.json.{os.getpid()}.{threading.get_ident()}.tmp"
         tmp.write_text(json.dumps(s.to_json(), ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(s.dir / "state.json")
 
@@ -181,6 +209,10 @@ class SandboxManager:
         if not runner_exe.is_file():
             raise SandboxManagerError(INVALID_ARGUMENT, f"Runner exe not found: {runner_exe}")
 
+        with self._lock_for(session_id):
+            return self._prepare_locked(session_id, runtime_id, generation, runner_exe)
+
+    def _prepare_locked(self, session_id: str, runtime_id: str, generation: int, runner_exe: Path) -> SandboxSession:
         directory = self.root / "sessions" / session_id
         if directory.exists():
             raise SandboxManagerError(INVALID_ARGUMENT, f"session {session_id} already exists")
@@ -195,6 +227,7 @@ class SandboxManager:
         self._event(s, "PREPARED", runner_sha256=s.runner_sha256)
         return s
 
+    @_locked
     def start(self, s: SandboxSession) -> str:
         """Start the Sandbox and return the Host address the Runner must dial.
 
@@ -250,6 +283,7 @@ class SandboxManager:
             self._fail(s, exc)
             raise
 
+    @_locked
     def publish_bootstrap(self, s: SandboxSession, host_cert_pem: str) -> None:
         """Hand the Guest what the Runner needs, after the Host wrote bootstrap.json. Marker goes last.
 
@@ -276,8 +310,14 @@ class SandboxManager:
         self._mark(s, "bootstrap_published")
         self._state(s, RUNNING)
 
+    @_locked
     def mark_ready(self, s: SandboxSession) -> None:
-        """The Host has verified the Runner. The bootstrap token is spent; remove the file the Guest can read."""
+        """The Host has verified the Runner. The bootstrap token is spent; remove the file the Guest can read.
+
+        If the session already ended (stop() won the race), stop() has removed the file: nothing to do.
+        """
+        if s.state in (TERMINATED, FAILED):
+            return
         self._need(s, RUNNING)
         s.ready_path.unlink(missing_ok=True)
         if s.bootstrap_path.exists():
@@ -285,9 +325,11 @@ class SandboxManager:
             self._event(s, "BOOTSTRAP_TOKEN_REMOVED")
         self._mark(s, "ready")
 
+    @_locked
     def is_running(self, s: SandboxSession) -> bool:
         return bool(s.sandbox_id) and s.sandbox_id in self.wsb.running()
 
+    @_locked
     def stop(self, s: SandboxSession, reason: str, *, emergency: bool = False) -> SandboxSession:
         """Stop and confirm on the Host. The Host sends TERMINATE first unless it is an emergency;
         a Runner's TERMINATE_RESULT is never proof that the Sandbox is gone."""
@@ -327,6 +369,7 @@ class SandboxManager:
             return                                        # still listed: do not claim FAILED-and-gone
         self._state(s, FAILED)
 
+    @_locked
     def cleanup(self, s: SandboxSession) -> dict:
         if s.state not in (TERMINATED, FAILED, PREPARED):
             raise SandboxManagerError(INVALID_ARGUMENT, f"session is {s.state}; stop it first")

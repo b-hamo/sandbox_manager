@@ -339,6 +339,67 @@ class StartFailures(Base):
         self.assertTrue(any(e["kind"] == "STOP_NOT_CONFIRMED" for e in s.events))
 
 
+class Concurrency(Base):
+    """Issue #3: the Host may call mark_ready() and stop() from two threads right after READY."""
+
+    def running_session(self):
+        m, s = self.started()
+        self.host_writes_bootstrap(s)
+        m.publish_bootstrap(s, CERT)
+        return m, s
+
+    def test_mark_ready_and_stop_together(self):
+        import threading
+        m, s = self.running_session()
+        inside, peak, guard = [0], [0], threading.Lock()
+        real_save = m._save
+
+        def slow_save(sess):                                    # widen the window a race would need
+            with guard:
+                inside[0] += 1
+                peak[0] = max(peak[0], inside[0])
+            try:
+                import time as _t
+                _t.sleep(0.01)
+                real_save(sess)
+            finally:
+                with guard:
+                    inside[0] -= 1
+        m._save = slow_save
+        errors = []
+
+        def run(fn, *a, **k):
+            try:
+                fn(*a, **k)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+        threads = [threading.Thread(target=run, args=(m.mark_ready, s)),
+                   threading.Thread(target=run, args=(m.stop, s, "TASK_COMPLETE"))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(errors, [])
+        self.assertEqual(peak[0], 1)                            # never two state.json writers at once
+        self.assertEqual(s.state, TERMINATED)
+        self.assertFalse(s.bootstrap_path.exists())
+        self.assertEqual(list(s.dir.glob("state.json.*.tmp")), [])   # no temp file left behind
+
+    def test_mark_ready_after_stop_is_harmless(self):
+        m, s = self.running_session()
+        m.stop(s, "TASK_COMPLETE")
+        m.mark_ready(s)                                         # stop() won the race: nothing to do
+        self.assertEqual(s.state, TERMINATED)
+
+    def test_failed_start_still_stops_inside_lock(self):
+        # start() calls stop() itself on failure; the lock must be reentrant for that.
+        m = self.manager(firewall=FakeFirewall(["rules not bound"]))
+        s = m.prepare("SES-1", "RT-SBX-001", 1, self.runner)
+        with self.assertRaises(SandboxManagerError):
+            m.start(s)
+        self.assertEqual((s.state, self.wsb.live), (FAILED, set()))
+
+
 class Firewall(unittest.TestCase):
     def rules(self, iface=SWITCH, block_ports=("1-17442", "17445-65535")):
         return [Rule("SCRP PoC 17443 from Sandbox", True, True, "Allow", "TCP", ["17443"], [iface]),
