@@ -1,6 +1,6 @@
 # sandbox_manager — Windows Sandbox Manager
 
-배주한·최정우 담당. Secure CUA Runtime의 Runtime/Lifecycle Manager 중 **Windows Sandbox 부분**이다(WBS 3.1~3.3, 4.8, 5.9).
+배주한 담당. Secure CUA Runtime의 Runtime/Lifecycle Manager 중 **Windows Sandbox 부분**이다(WBS 3.1~3.3, 4.8, 5.9).
 Host(`b-hamo/host_control`)와 Runner(`b-hamo/sandbox_runner`) 사이에서, 사람 손 없이 Sandbox를 켜고 끄고 정리한다.
 Python 3.13.15, 표준 라이브러리만 쓴다.
 
