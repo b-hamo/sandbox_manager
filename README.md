@@ -71,6 +71,7 @@ m.cleanup(s)
 | `tests/test_manager.py` | 가짜 wsb·네트워크·방화벽·시계로 31개 시험 (동시 호출 포함) |
 | `tools/smoke_real.py` | 실제 Sandbox로 Manager 단독 시험 (Host 없음) |
 | `tools/e2e_host.py` | 실제 Host(`sender.py --demo broker`) + 실제 Runner 전체 왕복. host_control venv로 실행 |
+| `tools/mcp_e2e.py` | Codex 역할: host_control `mcp_server.py`를 MCP stdio로 불러 task_submit → observe → click → type → session_stop, 끝난 뒤 Sandbox 남음 없음 확인. host_control venv로 실행 |
 | `tools/repeat_e2e.py` | `e2e_host.py`를 N회 연속 실행하고 회차 사이 남은 Sandbox·인증서·세션 파일 검사 (5.9) |
 | `tools/install_firewall.ps1` / `uninstall_firewall.ps1` | 방화벽 규칙 + 재부팅 후 자동 복구 예약 작업 설치/제거 (관리자, 한 번) |
 
@@ -80,6 +81,7 @@ m.cleanup(s)
 python -m unittest discover -s tests -v
 python tools/smoke_real.py <sandbox_runner.exe>
 <host_control>\.venv\Scripts\python.exe tools/e2e_host.py
+<host_control>\.venv\Scripts\python.exe tools/mcp_e2e.py --host-repo <host_control PR #25> --runner <sandbox_runner.exe>
 ```
 
 | 시험 | 결과 (2026-09-29, KISIA PC) |
