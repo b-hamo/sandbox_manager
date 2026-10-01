@@ -68,7 +68,7 @@ m.cleanup(s)
 | `sandbox_manager/firewall.py` | Host 방화벽 규칙이 현재 어댑터에 묶였는지, 17443·17444 허용·나머지 차단인지 검사(읽기만) |
 | `sandbox_manager/wsb.py` | `wsb` CLI 감싸기 (start, running, ip, connect, stop) |
 | `sandbox_manager/network.py` | vSwitch 주소, Guest로 가는 Host 주소 |
-| `tests/test_manager.py` | 가짜 wsb·네트워크·방화벽·시계로 28개 시험 |
+| `tests/test_manager.py` | 가짜 wsb·네트워크·방화벽·시계로 31개 시험 (동시 호출 포함) |
 | `tools/smoke_real.py` | 실제 Sandbox로 Manager 단독 시험 (Host 없음) |
 | `tools/e2e_host.py` | 실제 Host(`sender.py --demo broker`) + 실제 Runner 전체 왕복. host_control venv로 실행 |
 | `tools/repeat_e2e.py` | `e2e_host.py`를 N회 연속 실행하고 회차 사이 남은 Sandbox·인증서·세션 파일 검사 (5.9) |
@@ -84,7 +84,7 @@ python tools/smoke_real.py <sandbox_runner.exe>
 
 | 시험 | 결과 (2026-09-29, KISIA PC) |
 |---|---|
-| 자동 시험 | 28/28 통과 |
+| 자동 시험 | 31/31 통과 (동시 호출 시험 포함, 이슈 #3) |
 | **반복 안정성 10회** (`tools/repeat_e2e.py --runs 10`, 실제 Host·Runner) | **10/10 PASS, 흔적 0.** READY 18.3~20.1초(평균 19.3), 종료 확인 1.74~1.87초(평균 1.81), 회당 약 24초. 매 회차 뒤 Sandbox·인증서·개인 키·세션 파일 남음 없음 |
 | **재부팅 후 방화벽 자동 복구** (`install_firewall.ps1` 설치 → 재부팅 → 수동 명령 없이 `e2e_host.py`) | **PASS.** 재부팅 직후 규칙은 옛 어댑터에 묶여 무효, Sandbox 주소 대역도 바뀜(172.31.208.1). 감시 작업이 새 어댑터에 다시 묶었고 READY 21.0초, 종료 확인 1.9초 |
 | 실제 Host + Runner 전체 왕복 (`e2e_host.py`) | **PASS.** 켜기 2.5초, 주소 확인 4.1초, 준비 표시 8.6초, READY 17.6초(Host 검증 8.9초), Broker 데모 9호출(6 성공·3 의도 거부: 작업 등록 전 관찰, 화면 밖 클릭, Win+R), 종료 확인 1.86초, 정리 실패 0 |
