@@ -306,6 +306,8 @@ class SandboxManager:
 
         (s.bootstrap_dir / config.CERT_NAME).write_bytes(cert_der)
         (s.bootstrap_dir / config.ADDRESS_NAME).write_text(s.host_address, encoding="ascii")
+        for mapped in (s.package_dir, s.bootstrap_dir):     # files arrived after start()'s check
+            config.check_contents(mapped)
         s.ready_path.write_text("", encoding="ascii")
         self._mark(s, "bootstrap_published")
         self._state(s, RUNNING)
