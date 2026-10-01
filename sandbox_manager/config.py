@@ -4,12 +4,15 @@ Rules (CLAUDE.md "절대 하지 않는 것"):
 - every mapped folder is read-only; there is no parameter to make one writable
 - only folders inside this session's own workspace can be mapped (no user folders, browser
   profiles, Safe Results, or Host output)
+- nothing inside a mapped folder may lead elsewhere on the Host: no junction, symlink or other
+  reparse point, and no hard-linked file (tests/test_isolation.py)
 - Clipboard, printer, audio and video redirection are off
 - Networking stays on for the control channel. This is NOT isolation (미결 16)
 """
 from __future__ import annotations
 
 import ipaddress
+import os
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from xml.sax.saxutils import escape
@@ -73,6 +76,28 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def check_contents(folder: Path) -> None:
+    """Refuse a mapped folder holding anything that points outside it.
+
+    The mapping root is checked by build_wsb(); this walks what is inside. A junction or symlink
+    would show the Guest a Host folder, and a hard link shares the bytes of a Host file.
+    """
+    pending = [Path(folder)]
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for e in entries:
+                st = e.stat(follow_symlinks=False)
+                if e.is_symlink() or getattr(st, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise SandboxManagerError(INVALID_ARGUMENT, f"link inside a mapped folder: {e.path}")
+                if e.is_dir(follow_symlinks=False):
+                    pending.append(Path(e.path))
+                elif os.lstat(e.path).st_nlink > 1:            # DirEntry.stat() leaves st_nlink unset on Windows
+                    raise SandboxManagerError(INVALID_ARGUMENT, f"hard-linked file inside a mapped folder: {e.path}")
+
+
 def logon_command() -> str:
     """Fixed text: nothing session-specific goes on the command line (the address arrives as a file)."""
     return f"powershell.exe -NoProfile -ExecutionPolicy Bypass -File {GUEST_PACKAGE}\\{START_SCRIPT}"
@@ -90,6 +115,7 @@ def build_wsb(mappings: list[Mapping], command: str, workspace: Path) -> str:
             raise SandboxManagerError(INVALID_ARGUMENT, f"mapped folder does not exist: {m.host}")
         if not PureWindowsPath(m.guest).is_absolute():
             raise SandboxManagerError(INVALID_ARGUMENT, f"guest path must be absolute: {m.guest}")
+        check_contents(m.host)
     folders = "".join(
         "<MappedFolder>"
         f"<HostFolder>{escape(str(m.host.resolve()))}</HostFolder>"

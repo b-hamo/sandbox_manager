@@ -69,6 +69,7 @@ m.cleanup(s)
 | `sandbox_manager/wsb.py` | `wsb` CLI 감싸기 (start, running, ip, connect, stop) |
 | `sandbox_manager/network.py` | vSwitch 주소, Guest로 가는 Host 주소 |
 | `tests/test_manager.py` | 가짜 wsb·네트워크·방화벽·시계로 31개 시험 (동시 호출 포함) |
+| `tests/test_isolation.py` | 격리 우회 시도 13개: 연결 폴더 안 junction·symlink·hard link(켜기 전·켠 뒤), 폴더 바꿔치기, 사용자 폴더·브라우저 프로필 직접 지정, `..` 탈출, .wsb에 Host 경로 새는지 |
 | `tools/smoke_real.py` | 실제 Sandbox로 Manager 단독 시험 (Host 없음) |
 | `tools/e2e_host.py` | 실제 Host(`sender.py --demo broker`) + 실제 Runner 전체 왕복. host_control venv로 실행 |
 | `tools/mcp_e2e.py` | Codex 역할: host_control `mcp_server.py`를 MCP stdio로 불러 task_submit → observe → click → type → session_stop, 끝난 뒤 Sandbox 남음 없음 확인. host_control venv로 실행 |
