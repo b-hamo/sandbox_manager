@@ -68,7 +68,8 @@ m.cleanup(s)
 | `sandbox_manager/firewall.py` | Host 방화벽 규칙이 현재 어댑터에 묶였는지, 17443·17444 허용·나머지 차단인지 검사(읽기만) |
 | `sandbox_manager/wsb.py` | `wsb` CLI 감싸기 (start, running, ip, connect, stop) |
 | `sandbox_manager/network.py` | vSwitch 주소, Guest로 가는 Host 주소 |
-| `tests/test_manager.py` | 가짜 wsb·네트워크·방화벽·시계로 31개 시험 (동시 호출 포함) |
+| `sandbox_manager/process.py` | Sandbox를 켠 Host 프로세스가 살아 있는지 (PID + 생성 시각, 주인 없는 Sandbox 회수용) |
+| `tests/test_manager.py` | 가짜 wsb·네트워크·방화벽·시계·프로세스로 42개 시험 (동시 호출, 주인 없는 Sandbox 회수 포함) |
 | `tests/test_isolation.py` | 격리 우회 시도 13개: 연결 폴더 안 junction·symlink·hard link(켜기 전·켠 뒤), 폴더 바꿔치기, 사용자 폴더·브라우저 프로필 직접 지정, `..` 탈출, .wsb에 Host 경로 새는지 |
 | `tools/smoke_real.py` | 실제 Sandbox로 Manager 단독 시험 (Host 없음) |
 | `tools/e2e_host.py` | 실제 Host(`sender.py --demo broker`) + 실제 Runner 전체 왕복. host_control venv로 실행 |
@@ -87,7 +88,8 @@ python tools/smoke_real.py <sandbox_runner.exe>
 
 | 시험 | 결과 (2026-09-29, KISIA PC) |
 |---|---|
-| 자동 시험 | 31/31 통과 (동시 호출 시험 포함, 이슈 #3) |
+| 자동 시험 | 55/55 통과 (`test_manager` 42: 동시 호출·주인 없는 Sandbox 회수 포함, `test_isolation` 13) |
+| **Host 강제 종료 후 회수** (JH PC, READY 직후 `taskkill /F /T` → 다음 `e2e_host.py`) | **PASS.** Sandbox가 남은 것을 확인 → 다음 `start()`가 `ORPHAN_RECLAIMED` → 종료 확인 1.67초·정리 → 새 세션 PASS, 끝난 뒤 Sandbox 0 |
 | **반복 안정성 10회** (`tools/repeat_e2e.py --runs 10`, 실제 Host·Runner) | **10/10 PASS, 흔적 0.** READY 18.3~20.1초(평균 19.3), 종료 확인 1.74~1.87초(평균 1.81), 회당 약 24초. 매 회차 뒤 Sandbox·인증서·개인 키·세션 파일 남음 없음 |
 | **재부팅 후 방화벽 자동 복구** (`install_firewall.ps1` 설치 → 재부팅 → 수동 명령 없이 `e2e_host.py`) | **PASS.** 재부팅 직후 규칙은 옛 어댑터에 묶여 무효, Sandbox 주소 대역도 바뀜(172.31.208.1). 감시 작업이 새 어댑터에 다시 묶었고 READY 21.0초, 종료 확인 1.9초 |
 | 실제 Host + Runner 전체 왕복 (`e2e_host.py`) | **PASS.** 켜기 2.5초, 주소 확인 4.1초, 준비 표시 8.6초, READY 17.6초(Host 검증 8.9초), Broker 데모 9호출(6 성공·3 의도 거부: 작업 등록 전 관찰, 화면 밖 클릭, Win+R), 종료 확인 1.86초, 정리 실패 0 |
@@ -118,6 +120,7 @@ python tools/smoke_real.py <sandbox_runner.exe>
 - LogonCommand는 고정 문자열. 주소는 파일로 전달하고 Host·Guest 양쪽에서 IPv4인지 검사
 - Guest가 LAN 주소로 Host에 닿는 경우 거부 (방화벽이 못 거르는 NAT 경로)
 - 한 PC에 Sandbox 하나. 이미 떠 있으면 `RUNTIME_UNAVAILABLE`
+- **주인 없는 Sandbox 회수**: `start()`는 먼저 기록(state.json)을 보고, 켠 Host 프로세스가 죽었는데 안 끝난 세션(STARTING·STARTED·RUNNING)을 끄고 정리한다(`RUNTIME_ERROR`, 이벤트 `ORPHAN_RECLAIMED`). 켠 Host가 살아 있거나 확인이 안 되면 건드리지 않는다. 기록이 없는 Sandbox(손으로 켠 것 등)는 끄지 않고 거절한다. `reclaim_orphans()`로 따로 부를 수도 있다
 - 준비 표시 파일은 bootstrap.json이 완전한 JSON이 된 뒤, 인증서·주소 다음에 마지막으로
 - `wsb list`에서 사라진 것을 못 보면 TERMINATED로 기록하지 않는다
 
@@ -129,4 +132,4 @@ python tools/smoke_real.py <sandbox_runner.exe>
 - 방화벽 규칙을 설치 과정·재부팅 후 자동으로 다시 묶는 방법 (관리자 권한, 미결 14·20)
 - 재시작·Reset 상한(D-7, 5.9), Health 변화 시 처리
 - 네트워크 격리(미결 16): Guest outbound 차단 등
-- 멈춘 Sandbox 처리, Host 재시작 뒤 남은 Sandbox 회수
+- 멈춘 Sandbox 처리 (Host는 살아 있는데 Sandbox가 응답 없음)

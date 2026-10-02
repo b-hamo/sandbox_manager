@@ -20,6 +20,10 @@ Why the address comes after start: after a reboot the Default Switch does not ex
 Sandbox starts, and it comes back on a different subnet. The Guest start script therefore waits for
 the ready marker instead of taking the address on its command line.
 
+If the Host process dies (Codex closed or killed) its Sandbox would keep running and every later
+start() would fail with "already running". start() therefore first reclaims sessions whose owner
+process is gone (reclaim_orphans). A Sandbox with no session record here is never touched.
+
 READY is never decided here: only the Host, after its own checks, may say so (SCRP).
 The workspace holds a live token between publish_bootstrap() and mark_ready(), so it must not be
 synced (OneDrive); the Guest sees only the two read-only folders.
@@ -45,6 +49,7 @@ from .errors import (INVALID_ARGUMENT, RUNTIME_START_FAILED, RUNTIME_UNAVAILABLE
                                     SandboxManagerError)
 from .firewall import FIX_COMMAND, FirewallCheck
 from .network import HostNetwork
+from .process import process_started
 from .wsb import WsbCli
 
 RUNTIME_TYPE = "WINDOWS_SANDBOX"
@@ -53,6 +58,7 @@ ID_RE = re.compile(r"^[A-Z]{2,5}-[A-Za-z0-9]+(?:-[A-Za-z0-9]+){0,3}$")
 
 PREPARED, STARTING, STARTED, RUNNING, TERMINATED, FAILED = (
     "PREPARED", "STARTING", "STARTED", "RUNNING", "TERMINATED", "FAILED")
+LIVE_STATES = (STARTING, STARTED, RUNNING)      # a Sandbox may be up; stop() has not confirmed it gone
 
 
 def default_root() -> Path:
@@ -104,6 +110,7 @@ class SandboxSession:
     guest_ip: str | None = None
     runner_sha256: str | None = None
     termination_reason: str | None = None
+    owner: dict | None = None                    # {"pid", "started"} of the Host process that prepared it
     timings: dict = field(default_factory=dict)
     events: list = field(default_factory=list)
 
@@ -139,6 +146,7 @@ class SandboxManager:
                  firewall: FirewallCheck | None = None,
                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
                  ip_wait_s: float = 120, stop_verify_s: float = 30, firewall_wait_s: float = 20,
+                 process_started: Callable[[int], int | None] = process_started,
                  log: Callable[[str], None] | None = None):
         self.root = (root or default_root()).resolve()
         onedrive = os.environ.get("OneDrive")
@@ -153,6 +161,7 @@ class SandboxManager:
         self.ip_wait_s, self.stop_verify_s = ip_wait_s, stop_verify_s
         # tools/install_firewall.ps1's watcher rebinds rules within ~5 s of the adapter appearing.
         self.firewall_wait_s = firewall_wait_s
+        self.process_started = process_started
         self.log = log or (lambda msg: None)
         self._t0: dict[str, float] = {}
         self._locks: dict[str, threading.RLock] = {}
@@ -197,6 +206,58 @@ class SandboxManager:
         d["dir"] = Path(d["dir"])
         return SandboxSession(**d)
 
+    # ------------------------------------------------------------------ orphans
+    def _me(self) -> dict:
+        pid = os.getpid()
+        try:
+            started = self.process_started(pid)
+        except OSError:
+            started = None
+        return {"pid": pid, "started": started}
+
+    def _owner_alive(self, owner: dict | None) -> bool:
+        """False only when the owner is surely gone. When in doubt, alive: never stop a live Host's Sandbox."""
+        if not owner:
+            return False                              # recorded before owners were (orphan from an older version)
+        try:
+            now = self.process_started(owner["pid"])
+        except OSError:
+            return True
+        if now is None:
+            return False
+        return owner.get("started") is None or now == owner["started"]   # different start time: PID reused
+
+    def reclaim_orphans(self) -> list[str]:
+        """Stop and clean up Sandboxes whose Host process died before stop(). Returns their session IDs.
+
+        start() calls this first. Only sessions recorded here are touched; a Sandbox without a record
+        (started by hand, or by another tool) is left alone and start() refuses as before.
+        """
+        reclaimed = []
+        sessions = self.root / "sessions"
+        for path in sorted(sessions.glob("*/state.json")) if sessions.is_dir() else ():
+            sid = path.parent.name
+            try:
+                d = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                self.log(f"[{sid}] ORPHAN_SCAN_SKIPPED unreadable state.json: {exc}")
+                continue
+            if d.get("state") not in LIVE_STATES or self._owner_alive(d.get("owner")):
+                continue
+            with self._lock_for(sid):
+                s = self.load(sid)                            # re-read under the lock
+                if s.state not in LIVE_STATES or self._owner_alive(s.owner):
+                    continue
+                self._event(s, "ORPHAN_RECLAIMED", owner=s.owner, sandbox_id=s.sandbox_id)
+                try:
+                    self.stop(s, "RUNTIME_ERROR", emergency=True)
+                except SandboxManagerError as exc:
+                    self.log(f"[{sid}] ORPHAN_STOP_FAILED {exc.message}")   # still listed: start() will refuse
+                    continue
+                self.cleanup(s)
+                reclaimed.append(sid)
+        return reclaimed
+
     # ------------------------------------------------------------------ lifecycle
     def prepare(self, session_id: str, runtime_id: str, generation: int, runner_exe: Path) -> SandboxSession:
         """Create the session workspace with the Runner package. Starts nothing."""
@@ -216,7 +277,7 @@ class SandboxManager:
         directory = self.root / "sessions" / session_id
         if directory.exists():
             raise SandboxManagerError(INVALID_ARGUMENT, f"session {session_id} already exists")
-        s = SandboxSession(session_id, runtime_id, generation, directory)
+        s = SandboxSession(session_id, runtime_id, generation, directory, owner=self._me())
         s.package_dir.mkdir(parents=True)
         s.bootstrap_dir.mkdir()
         self._t0[session_id] = self.clock()
@@ -234,10 +295,13 @@ class SandboxManager:
         The Runner cannot start yet: the Guest script waits for publish_bootstrap().
         """
         self._need(s, PREPARED)
+        self.reclaim_orphans()
         running = self.wsb.running()
         if running:
             # One Windows Sandbox per PC (PoC). A second session needs another Runtime (미결 13).
-            raise SandboxManagerError(RUNTIME_UNAVAILABLE, f"a Windows Sandbox is already running: {sorted(running)}")
+            # Either a live Host owns it, or nobody here started it: refuse, never stop it.
+            raise SandboxManagerError(RUNTIME_UNAVAILABLE, f"a Windows Sandbox is already running: {sorted(running)}"
+                                      " (in use by another live Host, or not started by Sandbox Manager; close it first)")
 
         xml = config.build_wsb(
             [config.Mapping(s.package_dir, config.GUEST_PACKAGE), config.Mapping(s.bootstrap_dir, config.GUEST_BOOTSTRAP)],
