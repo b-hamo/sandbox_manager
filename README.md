@@ -48,7 +48,23 @@ m.stop(s, "TASK_COMPLETE")                             # 또는 emergency=True
 m.cleanup(s)
 ```
 
-상태: `PREPARED → STARTING → STARTED → RUNNING → TERMINATED`, 시작 실패 시 Sandbox를 끄고 `FAILED`.
+### Host가 살아 있을 때 복구 (언제 할지는 Host가 정함)
+
+```python
+# Runner가 죽었거나 대답이 없음, Sandbox는 멀쩡함 → 같은 Sandbox에서 Runner만 다시
+m.restart_runner(s, s.generation + 1)                  # Guest 안 옛 Runner 종료, 시작 스크립트가 새 bootstrap을 기다림
+# Sandbox 전체가 먹통 → Sandbox를 끄고(wsb list로 확인) 새로 켬
+address = m.reset_sandbox(s, s.generation + 1)         # start()처럼 새 Host 주소를 돌려줌 (주소가 바뀔 수 있음 → 인증서 다시)
+# 둘 다 그다음은 처음과 같음: 새 token·새 generation으로 bootstrap 쓰기 → publish_bootstrap() → READY → mark_ready()
+```
+
+- 두 함수를 합쳐 세션마다 **최대 `max_restarts`번(기본 3)**. 넘으면 `RUNTIME_UNAVAILABLE` → Host가 `stop()`
+- `generation`은 지금보다 커야 한다. 처리 중이던 클릭·입력은 여기서 다시 보내지 않는다(UNKNOWN 처리·재시도 승인은 Host)
+- `restart_runner()`는 Guest에 `wsb exec`로 **고정된 명령 하나**(`C:\RunnerPackage\restart.ps1`)만 실행한다. 실패(exit≠0) → `RUNTIME_START_FAILED`, 상태는 `RESTARTING`에 머묾 → Host가 `reset_sandbox()` 또는 `stop()`
+- `reset_sandbox()`는 옛 Sandbox가 안 꺼지면 `RUNTIME_UNAVAILABLE`, 아무것도 바꾸지 않음
+- `RESTARTING`도 살아 있는 세션이라 주인 없는 Sandbox 회수가 건드리지 않는다(켠 Host가 죽었을 때만)
+
+상태: `PREPARED → STARTING → STARTED → RUNNING → TERMINATED`, 시작 실패 시 Sandbox를 끄고 `FAILED`. 복구 중: `RUNNING → RESTARTING → RUNNING`(Runner 재시작), `→ PREPARED → STARTING → STARTED → RUNNING`(Sandbox 재설정).
 종료 사유: `TASK_COMPLETE`, `USER_STOP`, `SECURITY_VIOLATION`, `TIMEOUT`, `RUNTIME_ERROR`.
 오류: `SandboxManagerError.code` = `INVALID_ARGUMENT` / `RUNTIME_UNAVAILABLE` / `RUNTIME_START_FAILED`.
 
@@ -66,13 +82,14 @@ m.cleanup(s)
 | `sandbox_manager/manager.py` | 본체. prepare, start, publish_bootstrap, mark_ready, is_running, stop, cleanup, load |
 | `sandbox_manager/config.py` | .wsb 생성과 매핑 안전 검사, Guest 시작 스크립트 |
 | `sandbox_manager/firewall.py` | Host 방화벽 규칙이 현재 어댑터에 묶였는지, 17443·17444 허용·나머지 차단인지 검사(읽기만) |
-| `sandbox_manager/wsb.py` | `wsb` CLI 감싸기 (start, running, ip, connect, stop) |
+| `sandbox_manager/wsb.py` | `wsb` CLI 감싸기 (start, running, ip, connect, stop, exec — exec는 Runner 재시작 고정 명령에만) |
 | `sandbox_manager/network.py` | vSwitch 주소, Guest로 가는 Host 주소 |
 | `sandbox_manager/process.py` | Sandbox를 켠 Host 프로세스가 살아 있는지 (PID + 생성 시각, 주인 없는 Sandbox 회수용) |
 | `tests/test_manager.py` | 가짜 wsb·네트워크·방화벽·시계·프로세스로 42개 시험 (동시 호출, 주인 없는 Sandbox 회수 포함) |
 | `tests/test_isolation.py` | 격리 우회 시도 13개: 연결 폴더 안 junction·symlink·hard link(켜기 전·켠 뒤), 폴더 바꿔치기, 사용자 폴더·브라우저 프로필 직접 지정, `..` 탈출, .wsb에 Host 경로 새는지 |
 | `tools/smoke_real.py` | 실제 Sandbox로 Manager 단독 시험 (Host 없음) |
 | `tools/e2e_host.py` | 실제 Host(`sender.py --demo broker`) + 실제 Runner 전체 왕복. host_control venv로 실행 |
+| `tools/recovery_e2e.py` | 실제 Host·Runner로 복구 시험: READY 뒤 Host 강제 종료 → `restart_runner()` 후 같은 Sandbox에서 데모 완료 → `reset_sandbox()` 후 새 Sandbox에서 데모 완료 → 남은 Sandbox 없음. host_control venv로 실행 |
 | `tools/mcp_e2e.py` | Codex 역할: host_control `mcp_server.py`를 MCP stdio로 불러 task_submit → observe → click → type → session_stop, 끝난 뒤 Sandbox 남음 없음 확인. host_control venv로 실행 |
 | `tools/repeat_e2e.py` | `e2e_host.py`를 N회 연속 실행하고 회차 사이 남은 Sandbox·인증서·세션 파일 검사 (5.9) |
 | `tools/install_firewall.ps1` / `uninstall_firewall.ps1` | 방화벽 규칙 + 재부팅 후 자동 복구 예약 작업 설치/제거 (관리자, 한 번) |
@@ -88,7 +105,8 @@ python tools/smoke_real.py <sandbox_runner.exe>
 
 | 시험 | 결과 (2026-09-29, KISIA PC) |
 |---|---|
-| 자동 시험 | 55/55 통과 (`test_manager` 42: 동시 호출·주인 없는 Sandbox 회수 포함, `test_isolation` 13) |
+| 자동 시험 | 69/69 통과 (`test_manager` 56: 동시 호출·주인 없는 Sandbox 회수·Runner 재시작·Sandbox 재설정 포함, `test_isolation` 13) |
+| **Runner 재시작·Sandbox 재설정** (JH PC 2026-10-02, `tools/recovery_e2e.py`, Runner develop `452e1b5`) | **PASS** — host_control feat/19(11칸) 44.8초, PR #25 `0690845`(12칸, `--advertise-address`) 46.6초. 재시작 후 READY까지 약 2초(같은 Sandbox), 재설정 후 새 Sandbox에서 데모 완료, 끝난 뒤 Sandbox 0 |
 | **Host 강제 종료 후 회수** (JH PC, READY 직후 `taskkill /F /T` → 다음 `e2e_host.py`) | **PASS.** Sandbox가 남은 것을 확인 → 다음 `start()`가 `ORPHAN_RECLAIMED` → 종료 확인 1.67초·정리 → 새 세션 PASS, 끝난 뒤 Sandbox 0 |
 | **반복 안정성 10회** (`tools/repeat_e2e.py --runs 10`, 실제 Host·Runner) | **10/10 PASS, 흔적 0.** READY 18.3~20.1초(평균 19.3), 종료 확인 1.74~1.87초(평균 1.81), 회당 약 24초. 매 회차 뒤 Sandbox·인증서·개인 키·세션 파일 남음 없음 |
 | **재부팅 후 방화벽 자동 복구** (`install_firewall.ps1` 설치 → 재부팅 → 수동 명령 없이 `e2e_host.py`) | **PASS.** 재부팅 직후 규칙은 옛 어댑터에 묶여 무효, Sandbox 주소 대역도 바뀜(172.31.208.1). 감시 작업이 새 어댑터에 다시 묶었고 READY 21.0초, 종료 확인 1.9초 |
@@ -123,6 +141,7 @@ python tools/smoke_real.py <sandbox_runner.exe>
 - **주인 없는 Sandbox 회수**: `start()`는 먼저 기록(state.json)을 보고, 켠 Host 프로세스가 죽었는데 안 끝난 세션(STARTING·STARTED·RUNNING)을 끄고 정리한다(`RUNTIME_ERROR`, 이벤트 `ORPHAN_RECLAIMED`). 켠 Host가 살아 있거나 확인이 안 되면 건드리지 않는다. 기록이 없는 Sandbox(손으로 켠 것 등)는 끄지 않고 거절한다. `reclaim_orphans()`로 따로 부를 수도 있다
 - 준비 표시 파일은 bootstrap.json이 완전한 JSON이 된 뒤, 인증서·주소 다음에 마지막으로
 - `wsb list`에서 사라진 것을 못 보면 TERMINATED로 기록하지 않는다
+- Guest 안 명령 실행(`wsb exec`)은 고정 문자열 `restart_command()` 하나뿐. 바깥에서 명령을 넘길 방법이 없다(Generic RPC 금지)
 
 ## 남은 것
 
@@ -130,6 +149,5 @@ python tools/smoke_real.py <sandbox_runner.exe>
 - `task_submit` 응답 방식: READY까지 18초, 재부팅 직후 1분 이상 → 바로 답하고 `runtime_get_state`로 확인하는 방식 제안(이준원 결정)
 - Runner pinning 전환(Runner 담당과 논의): 되면 Guest의 `certutil` 단계 제거 가능
 - 방화벽 규칙을 설치 과정·재부팅 후 자동으로 다시 묶는 방법 (관리자 권한, 미결 14·20)
-- 재시작·Reset 상한(D-7, 5.9), Health 변화 시 처리
+- Host 쪽 복구 연결(이준원): 언제 `restart_runner()`/`reset_sandbox()`를 부를지, 새 generation 세션 받아 주기, 진행 중 Action UNKNOWN 처리, Agent 알림
 - 네트워크 격리(미결 16): Guest outbound 차단 등
-- 멈춘 Sandbox 처리 (Host는 살아 있는데 Sandbox가 응답 없음)
