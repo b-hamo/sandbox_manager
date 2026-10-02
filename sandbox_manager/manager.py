@@ -16,6 +16,14 @@ in-process function calls). Order proven end to end on 2026-09-29 (poc/sandbox-l
     TERMINATE / failure / kill             ->   stop()              wsb stop, confirmed by `wsb list`
                                            ->   cleanup()           package, bootstrap, .wsb removed
 
+Recovery while the Host is alive (the Host decides when; at most max_restarts per session, both counted):
+    Runner died, Sandbox fine              ->   restart_runner(s, generation+1)   old Runner ended in the Guest,
+                                                                    start script waits for a new bootstrap
+    Sandbox unresponsive                   ->   reset_sandbox(s, generation+1)    old Sandbox stopped (confirmed),
+                                                                    a new one started; returns its Host address
+    then, as above: new bootstrap (new token, the new generation) -> publish_bootstrap() -> READY -> mark_ready()
+The Guest is touched only through `wsb exec` with one fixed command (config.restart_command()).
+
 Why the address comes after start: after a reboot the Default Switch does not exist until the first
 Sandbox starts, and it comes back on a different subnet. The Guest start script therefore waits for
 the ready marker instead of taking the address on its command line.
@@ -56,9 +64,10 @@ RUNTIME_TYPE = "WINDOWS_SANDBOX"
 TERMINATION_REASONS = ("TASK_COMPLETE", "USER_STOP", "SECURITY_VIOLATION", "TIMEOUT", "RUNTIME_ERROR")
 ID_RE = re.compile(r"^[A-Z]{2,5}-[A-Za-z0-9]+(?:-[A-Za-z0-9]+){0,3}$")
 
-PREPARED, STARTING, STARTED, RUNNING, TERMINATED, FAILED = (
-    "PREPARED", "STARTING", "STARTED", "RUNNING", "TERMINATED", "FAILED")
-LIVE_STATES = (STARTING, STARTED, RUNNING)      # a Sandbox may be up; stop() has not confirmed it gone
+PREPARED, STARTING, STARTED, RUNNING, RESTARTING, TERMINATED, FAILED = (
+    "PREPARED", "STARTING", "STARTED", "RUNNING", "RESTARTING", "TERMINATED", "FAILED")
+# A Sandbox may be up; stop() has not confirmed it gone. RESTARTING is live: a dead Runner is not a dead Host.
+LIVE_STATES = (STARTING, STARTED, RUNNING, RESTARTING)
 
 
 def default_root() -> Path:
@@ -111,6 +120,7 @@ class SandboxSession:
     runner_sha256: str | None = None
     termination_reason: str | None = None
     owner: dict | None = None                    # {"pid", "started"} of the Host process that prepared it
+    restarts: int = 0                            # restart_runner() + reset_sandbox() calls so far
     timings: dict = field(default_factory=dict)
     events: list = field(default_factory=list)
 
@@ -146,7 +156,7 @@ class SandboxManager:
                  firewall: FirewallCheck | None = None,
                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
                  ip_wait_s: float = 120, stop_verify_s: float = 30, firewall_wait_s: float = 20,
-                 process_started: Callable[[int], int | None] = process_started,
+                 process_started: Callable[[int], int | None] = process_started, max_restarts: int = 3,
                  log: Callable[[str], None] | None = None):
         self.root = (root or default_root()).resolve()
         onedrive = os.environ.get("OneDrive")
@@ -162,6 +172,8 @@ class SandboxManager:
         # tools/install_firewall.ps1's watcher rebinds rules within ~5 s of the adapter appearing.
         self.firewall_wait_s = firewall_wait_s
         self.process_started = process_started
+        # Safety cap per session (D-7). The Host's own policy decides when to restart; this only stops a loop.
+        self.max_restarts = max_restarts
         self.log = log or (lambda msg: None)
         self._t0: dict[str, float] = {}
         self._locks: dict[str, threading.RLock] = {}
@@ -284,6 +296,7 @@ class SandboxManager:
 
         shutil.copy2(runner_exe, s.package_dir / config.RUNNER_NAME)
         (s.package_dir / config.START_SCRIPT).write_text(config.START_PS1, encoding="utf-8-sig")
+        (s.package_dir / config.RESTART_SCRIPT).write_text(config.RESTART_PS1, encoding="utf-8-sig")
         s.runner_sha256 = _sha256(s.package_dir / config.RUNNER_NAME)   # J-3: this session runs this exact build
         self._event(s, "PREPARED", runner_sha256=s.runner_sha256)
         return s
@@ -353,8 +366,9 @@ class SandboxManager:
 
         Files are written directly: while a folder is mapped, the Host cannot rename inside it (PoC),
         so write-then-rename is impossible and the marker plays that role.
+        Also the second half of restart_runner(): the Guest start script is waiting for this marker.
         """
-        self._need(s, STARTED)
+        self._need(s, STARTED, RESTARTING)
         try:
             cert_der = ssl.PEM_cert_to_DER_cert(host_cert_pem)
         except (ValueError, TypeError):
@@ -405,25 +419,82 @@ class SandboxManager:
             return s
         self._event(s, "STOP_REQUESTED", reason=reason, emergency=emergency)
         t0 = self.clock()
-        s.ready_path.unlink(missing_ok=True)
-        s.bootstrap_path.unlink(missing_ok=True)
-        if s.sandbox_id:
-            if s.sandbox_id in self.wsb.running():
-                try:
-                    self.wsb.stop(s.sandbox_id)
-                except SandboxManagerError as exc:
-                    self._event(s, "WSB_STOP_ERROR", error=exc.message)
-            deadline = self.clock() + self.stop_verify_s
-            while s.sandbox_id in self.wsb.running():
-                if self.clock() > deadline:
-                    self._event(s, "STOP_NOT_CONFIRMED", sandbox_id=s.sandbox_id)
-                    raise SandboxManagerError(RUNTIME_UNAVAILABLE,
-                                              f"sandbox {s.sandbox_id} still listed after {self.stop_verify_s}s")
-                self.sleep(1)
+        self._stop_sandbox(s)
         s.termination_reason = reason
         self._mark(s, "terminated")
         self._state(s, TERMINATED, reason=reason, verified_by="wsb list", stop_s=round(self.clock() - t0, 2))
         return s
+
+    def _stop_sandbox(self, s: SandboxSession) -> None:
+        """Remove what the Guest could still read, stop the Sandbox, return only once `wsb list` drops it."""
+        s.ready_path.unlink(missing_ok=True)
+        s.bootstrap_path.unlink(missing_ok=True)
+        if not s.sandbox_id:
+            return
+        if s.sandbox_id in self.wsb.running():
+            try:
+                self.wsb.stop(s.sandbox_id)
+            except SandboxManagerError as exc:
+                self._event(s, "WSB_STOP_ERROR", error=exc.message)
+        deadline = self.clock() + self.stop_verify_s
+        while s.sandbox_id in self.wsb.running():
+            if self.clock() > deadline:
+                self._event(s, "STOP_NOT_CONFIRMED", sandbox_id=s.sandbox_id)
+                raise SandboxManagerError(RUNTIME_UNAVAILABLE,
+                                          f"sandbox {s.sandbox_id} still listed after {self.stop_verify_s}s")
+            self.sleep(1)
+
+    # ------------------------------------------------------------------ recovery (Host decides when)
+    def _begin_recovery(self, s: SandboxSession, generation: int, *states: str) -> None:
+        self._need(s, *states)
+        if not isinstance(generation, int) or isinstance(generation, bool) or generation <= s.generation:
+            raise SandboxManagerError(INVALID_ARGUMENT,
+                                      f"generation must be an integer above {s.generation}, got {generation!r}")
+        if s.restarts >= self.max_restarts:
+            raise SandboxManagerError(RUNTIME_UNAVAILABLE,
+                                      f"restart limit reached ({s.restarts}/{self.max_restarts}); stop the session")
+
+    @_locked
+    def restart_runner(self, s: SandboxSession, generation: int) -> None:
+        """The Runner died or stopped answering; the Sandbox itself is fine.
+
+        Ends the old Runner in the Guest and starts the Guest start script again, which waits for the
+        new ready marker. The Host then writes bootstrap.json for `generation` (new token) and calls
+        publish_bootstrap(); after READY, mark_ready(). Clicks or keys in flight are not replayed here.
+        """
+        self._begin_recovery(s, generation, RUNNING, RESTARTING)
+        if not self.is_running(s):
+            raise SandboxManagerError(RUNTIME_UNAVAILABLE, f"sandbox {s.sandbox_id} is gone; use reset_sandbox() or stop()")
+        s.ready_path.unlink(missing_ok=True)                 # the Guest must wait for the NEW bootstrap
+        s.bootstrap_path.unlink(missing_ok=True)
+        s.restarts += 1
+        old, s.generation = s.generation, generation
+        self._state(s, RESTARTING, recovery="runner", generation_from=old, generation=generation, restarts=s.restarts)
+        code = self.wsb.exec(s.sandbox_id, config.restart_command())
+        if code != 0:
+            self._event(s, "RUNNER_RESTART_FAILED", exit_code=code)
+            raise SandboxManagerError(RUNTIME_START_FAILED,
+                                      f"Guest restart script exit {code} (3: old Runner would not end); "
+                                      "try reset_sandbox() or stop()")
+        self._event(s, "RUNNER_RESTARTED", detail="waiting for the new bootstrap")
+
+    @_locked
+    def reset_sandbox(self, s: SandboxSession, generation: int) -> str:
+        """The Sandbox is unresponsive: stop it (confirmed by `wsb list`) and start a fresh one.
+
+        Returns the new Host address, exactly like start(); the Host then makes a certificate for it
+        (the address may change), writes bootstrap.json for `generation` and calls publish_bootstrap().
+        If the old Sandbox will not stop, raises RUNTIME_UNAVAILABLE and changes nothing else.
+        """
+        self._begin_recovery(s, generation, STARTED, RUNNING, RESTARTING)
+        old_id = s.sandbox_id
+        self._stop_sandbox(s)
+        s.restarts += 1
+        old, s.generation = s.generation, generation
+        s.sandbox_id = s.guest_ip = s.host_address = None
+        self._state(s, PREPARED, recovery="sandbox", old_sandbox_id=old_id, generation_from=old, generation=generation,
+                    restarts=s.restarts)
+        return self.start(s)
 
     def _fail(self, s: SandboxSession, exc: SandboxManagerError) -> None:
         """Never leave a Sandbox running after a failed start."""

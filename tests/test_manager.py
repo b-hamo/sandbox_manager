@@ -15,8 +15,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sandbox_manager import (FAILED, PREPARED, RUNNING, STARTED, TERMINATED, SandboxManager,  # noqa: E402
-                             SandboxManagerError)
+from sandbox_manager import (FAILED, PREPARED, RESTARTING, RUNNING, STARTED, TERMINATED,  # noqa: E402
+                             SandboxManager, SandboxManagerError)
 from sandbox_manager import config  # noqa: E402
 from sandbox_manager.firewall import Rule, evaluate  # noqa: E402
 
@@ -44,11 +44,19 @@ class FakeWsb:
         self.started_xml: list[str] = []
         self.connected: list[str] = []
         self.ip_calls = 0
+        self.exec_calls: list[tuple[str, str]] = []
+        self.exec_code = 0
 
     def start(self, xml):
         self.started_xml.append(xml)
-        self.live.add(SBX)
-        return SBX
+        n = len(self.started_xml)
+        sid = SBX if n == 1 else f"{n:08d}-2222-3333-4444-555555555555"   # a reset gets a new Sandbox
+        self.live.add(sid)
+        return sid
+
+    def exec(self, sid, command):
+        self.exec_calls.append((sid, command))
+        return self.exec_code
 
     def running(self):
         return set(self.live)
@@ -516,6 +524,167 @@ class Orphans(Base):
         m = self.manager()
         self.assertEqual(m.reclaim_orphans(), [])
         self.assertEqual(m.load(done.session_id).events[-1]["kind"], "STATE")   # nothing appended
+
+
+class Recovery(Base):
+    """restart_runner(): the Runner died, the Sandbox is fine. reset_sandbox(): the Sandbox is unresponsive."""
+
+    def running_session(self, m=None):
+        m, s = self.started(m)
+        self.host_writes_bootstrap(s)
+        m.publish_bootstrap(s, CERT)
+        m.mark_ready(s)
+        return m, s
+
+    def test_restart_runner_round_trip(self):
+        m, s = self.running_session()
+        self.host_writes_bootstrap(s)                           # stale file a Guest could still read
+        m.restart_runner(s, 2)
+        self.assertEqual((s.state, s.generation, s.restarts), (RESTARTING, 2, 1))
+        self.assertEqual(self.wsb.exec_calls, [(SBX, config.restart_command())])   # the one fixed command
+        self.assertFalse(s.bootstrap_path.exists())             # Guest waits for the NEW bootstrap
+        self.assertFalse(s.ready_path.exists())
+        self.assertIn(SBX, self.wsb.live)                       # same Sandbox
+        self.host_writes_bootstrap(s)                           # Host: new token, generation 2
+        m.publish_bootstrap(s, CERT)
+        self.assertEqual(s.state, RUNNING)
+        self.assertTrue(s.ready_path.exists())
+        m.mark_ready(s)
+        self.assertEqual(m.load(s.session_id).restarts, 1)
+        m.stop(s, "TASK_COMPLETE")
+
+    def test_restart_script_is_fixed_and_in_the_package(self):
+        m, s = self.running_session()
+        script = (s.package_dir / config.RESTART_SCRIPT).read_text(encoding="utf-8-sig")
+        self.assertIn("Stop-Process -Name sandbox_runner", script)
+        self.assertIn(r"C:\RunnerPackage\start.ps1", script)
+        self.assertEqual(config.restart_command(),
+                         r"powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\RunnerPackage\restart.ps1")
+        m.stop(s, "TASK_COMPLETE")
+
+    def test_generation_must_go_up(self):
+        m, s = self.running_session()
+        for bad in (1, 0, True, "2", None):
+            self.assertCode("INVALID_ARGUMENT", m.restart_runner, s, bad)
+            self.assertCode("INVALID_ARGUMENT", m.reset_sandbox, s, bad)
+        self.assertEqual((s.state, s.restarts), (RUNNING, 0))
+        m.stop(s, "TASK_COMPLETE")
+
+    def test_restart_limit_is_shared(self):
+        m, s = self.running_session()
+        m.restart_runner(s, 2)
+        m.reset_sandbox(s, 3)                                   # from RESTARTING: escalate to a new Sandbox
+        self.host_writes_bootstrap(s)
+        m.publish_bootstrap(s, CERT)
+        m.restart_runner(s, 4)
+        self.assertEqual(s.restarts, 3)
+        err = self.assertCode("RUNTIME_UNAVAILABLE", m.restart_runner, s, 5)
+        self.assertIn("restart limit", err.message)
+        self.assertCode("RUNTIME_UNAVAILABLE", m.reset_sandbox, s, 5)
+        self.assertEqual(s.generation, 4)
+        m.stop(s, "RUNTIME_ERROR", emergency=True)
+
+    def test_limit_is_configurable(self):
+        m = SandboxManager(self.root, wsb=self.wsb, network=FakeNet(), firewall=FakeFirewall(), clock=self.clock,
+                           sleep=self.clock.sleep, ip_wait_s=10, stop_verify_s=5, process_started=self.procs,
+                           max_restarts=0)
+        m, s = self.running_session(m)
+        self.assertCode("RUNTIME_UNAVAILABLE", m.restart_runner, s, 2)
+        m.stop(s, "TASK_COMPLETE")
+
+    def test_restart_when_sandbox_is_gone(self):
+        m, s = self.running_session()
+        self.wsb.live.clear()
+        self.assertCode("RUNTIME_UNAVAILABLE", m.restart_runner, s, 2)
+        self.assertEqual((s.state, s.generation, s.restarts, self.wsb.exec_calls), (RUNNING, 1, 0, []))
+
+    def test_restart_script_fails_then_stop_or_reset(self):
+        m, s = self.running_session()
+        self.wsb.exec_code = 3                                  # old Runner would not end
+        self.assertCode("RUNTIME_START_FAILED", m.restart_runner, s, 2)
+        self.assertEqual(s.state, RESTARTING)
+        self.assertTrue(any(e["kind"] == "RUNNER_RESTART_FAILED" for e in s.events))
+        self.assertEqual(m.reset_sandbox(s, 3), "192.168.208.1")   # escalate
+        self.assertEqual((s.state, s.restarts), (STARTED, 2))
+        m.stop(s, "RUNTIME_ERROR", emergency=True)
+        self.assertEqual(s.state, TERMINATED)
+
+    def test_reset_sandbox(self):
+        m, s = self.running_session()
+        address = m.reset_sandbox(s, 2)
+        self.assertEqual(address, "192.168.208.1")
+        self.assertNotIn(SBX, self.wsb.live)                    # old Sandbox confirmed gone
+        self.assertEqual(len(self.wsb.live), 1)
+        self.assertNotEqual(s.sandbox_id, SBX)
+        self.assertEqual((s.state, s.generation, s.restarts), (STARTED, 2, 1))
+        self.assertTrue(any(e.get("recovery") == "sandbox" and e.get("old_sandbox_id") == SBX for e in s.events))
+        self.host_writes_bootstrap(s)
+        m.publish_bootstrap(s, CERT)
+        m.mark_ready(s)
+        m.stop(s, "TASK_COMPLETE")
+        self.assertEqual(self.wsb.live, set())
+
+    def test_reset_when_old_sandbox_will_not_stop(self):
+        m, s = self.running_session()
+        self.wsb.stop_works = False
+        self.assertCode("RUNTIME_UNAVAILABLE", m.reset_sandbox, s, 2)
+        self.assertEqual((s.state, s.generation, s.restarts, len(self.wsb.started_xml)), (RUNNING, 1, 0, 1))
+
+    def test_recovery_refused_outside_a_live_session(self):
+        m = self.manager()
+        s = m.prepare("SES-1", "RT-SBX-001", 1, self.runner)
+        self.assertCode("INVALID_ARGUMENT", m.restart_runner, s, 2)
+        self.assertCode("INVALID_ARGUMENT", m.reset_sandbox, s, 2)
+        m.start(s)
+        m.stop(s, "TASK_COMPLETE")
+        self.assertCode("INVALID_ARGUMENT", m.restart_runner, s, 2)
+        self.assertCode("INVALID_ARGUMENT", m.reset_sandbox, s, 2)
+
+    def test_restarting_is_live_for_orphan_reclaim(self):
+        m, s = self.running_session()
+        m.restart_runner(s, 2)
+        self.assertEqual(self.manager().reclaim_orphans(), [])  # its Host is alive: not an orphan
+        d = json.loads((s.dir / "state.json").read_text(encoding="utf-8"))
+        d["owner"] = {"pid": 424242, "started": 5}              # now its Host died mid-restart
+        (s.dir / "state.json").write_text(json.dumps(d), encoding="utf-8")
+        self.assertEqual(self.manager().reclaim_orphans(), [s.session_id])
+        self.assertNotIn(SBX, self.wsb.live)
+
+
+class WsbExec(unittest.TestCase):
+    def test_exit_code_from_text(self):
+        from sandbox_manager.wsb import WsbCli
+        w = WsbCli(exe="wsb")
+        for text, code in (("프로세스가 종료되었습니다(코드: 0).", 0), ("프로세스가 종료되었습니다(코드: 7).", 7),
+                           ("Process exited with code -1.", -1)):
+            with mock.patch.object(w, "_run", return_value=(None, text)):
+                self.assertEqual(w.exec("x", "cmd"), code)
+        with mock.patch.object(w, "_run", return_value=({"ExitCode": 3}, "{}")):
+            self.assertEqual(w.exec("x", "cmd"), 3)
+
+    def test_waits_for_the_logon_session(self):
+        from sandbox_manager import wsb as wsbmod
+        w = wsbmod.WsbCli(exe="wsb")
+        calls = []
+
+        def fake_run(*a, **k):
+            calls.append(a)
+            if len(calls) < 3:
+                raise SandboxManagerError("RUNTIME_UNAVAILABLE", "wsb exec exit 1: 지정한 로그온 세션이 없습니다. (0x80070520)")
+            return None, "프로세스가 종료되었습니다(코드: 0)."
+        with mock.patch.object(w, "_run", side_effect=fake_run), mock.patch.object(wsbmod.time, "sleep"):
+            self.assertEqual(w.exec("x", "cmd"), 0)
+        self.assertEqual(len(calls), 3)
+        self.assertIn("ExistingLogin", calls[0])
+
+    def test_other_errors_are_not_retried(self):
+        from sandbox_manager.wsb import WsbCli
+        w = WsbCli(exe="wsb")
+        err = SandboxManagerError("RUNTIME_UNAVAILABLE", "wsb exec exit 1: 지정된 파일을 찾을 수 없습니다. (0x80070002)")
+        with mock.patch.object(w, "_run", side_effect=err) as run:
+            with self.assertRaises(SandboxManagerError):
+                w.exec("x", "cmd")
+        self.assertEqual(run.call_count, 1)
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows process API")

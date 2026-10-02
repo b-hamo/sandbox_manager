@@ -23,6 +23,7 @@ GUEST_PACKAGE = r"C:\RunnerPackage"
 GUEST_BOOTSTRAP = r"C:\RunnerBootstrap"
 RUNNER_NAME = "sandbox_runner.exe"
 START_SCRIPT = "start.ps1"
+RESTART_SCRIPT = "restart.ps1"
 # In the bootstrap folder, written after the Sandbox started. READY_NAME is always written last.
 BOOTSTRAP_NAME = "bootstrap.json"
 CERT_NAME = "host-cert.cer"
@@ -59,6 +60,20 @@ try {
   "runner start failed: $($_.Exception.Message)" | Out-File $log -Append -Encoding utf8
   exit 1
 }
+"""
+
+# Run by SandboxManager.restart_runner() through `wsb exec` (Host side, fixed text, no arguments).
+# Ends the old Runner, then starts start.ps1 again detached: it waits for the ready marker of the
+# NEW bootstrap that the Host writes next. Exit 3: the old Runner would not die.
+RESTART_PS1 = r"""Stop-Process -Name sandbox_runner -Force -ErrorAction SilentlyContinue
+$t0 = Get-Date
+while ((Get-Process -Name sandbox_runner -ErrorAction SilentlyContinue) -and ((Get-Date) - $t0).TotalSeconds -lt 10) {
+  Start-Sleep -Milliseconds 200
+}
+if (Get-Process -Name sandbox_runner -ErrorAction SilentlyContinue) { exit 3 }
+Start-Process -FilePath powershell.exe -WindowStyle Hidden `
+  -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','C:\RunnerPackage\start.ps1'
+exit 0
 """
 
 
@@ -101,6 +116,11 @@ def check_contents(folder: Path) -> None:
 def logon_command() -> str:
     """Fixed text: nothing session-specific goes on the command line (the address arrives as a file)."""
     return f"powershell.exe -NoProfile -ExecutionPolicy Bypass -File {GUEST_PACKAGE}\\{START_SCRIPT}"
+
+
+def restart_command() -> str:
+    """Fixed text, like logon_command(). The only command Sandbox Manager ever runs through `wsb exec`."""
+    return f"powershell.exe -NoProfile -ExecutionPolicy Bypass -File {GUEST_PACKAGE}\\{RESTART_SCRIPT}"
 
 
 def check_ipv4(value: str) -> str:

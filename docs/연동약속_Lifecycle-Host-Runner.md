@@ -54,6 +54,23 @@ Host 프로세스 종료(Codex가 끔)
 - 오류는 `SandboxManagerError.code`: `INVALID_ARGUMENT` / `RUNTIME_UNAVAILABLE` / `RUNTIME_START_FAILED`. `start()`가 실패하면 Sandbox는 이미 꺼져 있다(FAILED)
 - `publish_bootstrap`에는 Host가 bootstrap에 실제로 넣은 인증서 PEM을 넘긴다(개인 키가 섞이면 거부)
 
+### 2-2. Host가 살아 있을 때 복구 (2026-10-02 Lifecycle 추가, Host 연결은 이준원)
+
+```
+Runner 연결 끊김 / 응답 없음, Sandbox는 살아 있음 (sm.is_running(s) == True)
+  Host  → sm.restart_runner(s, generation+1)       # Guest 안 옛 Runner 종료, 시작 스크립트가 새 bootstrap 대기
+Sandbox 먹통 (Heartbeat UNRESPONSIVE 등) 또는 restart_runner 실패
+  Host  → address = sm.reset_sandbox(s, generation+1)   # 옛 Sandbox 끄기(wsb list 확인) → 새 Sandbox, 새 주소
+그다음 (둘 다)
+  Host  : 같은 session_id, 새 generation으로 세션 등록·새 token, (reset이면 새 주소로 인증서) → write_bootstrap
+  Host  → sm.publish_bootstrap(s, cert_pem) → Runner 접속 → Startup Verification → READY → sm.mark_ready(s)
+```
+
+- 두 함수를 합쳐 세션마다 최대 3번(`SandboxManager(max_restarts=...)`로 바꿈). 넘으면 `RUNTIME_UNAVAILABLE` → `stop()`
+- **Host가 할 일:** 언제·몇 번 부를지(보안 위반이면 재시작 안 함 등), 새 generation 세션을 받아 주기(옛 generation 메시지는 계속 거부), 끊길 때 처리 중이던 Action은 UNKNOWN(자동 재전송 금지, 상태 조회 뒤 새 action_id로 재시도 승인), Agent에게 "재시작 중" 알림
+- `restart_runner()` 실패(`RUNTIME_START_FAILED`, 상태 `RESTARTING`) → `reset_sandbox()` 또는 `stop()`. `reset_sandbox()`가 옛 Sandbox를 못 끄면 `RUNTIME_UNAVAILABLE`, 상태 그대로 → `stop(emergency=True)`
+- 실제 시험: `tools/recovery_e2e.py` (host_control feat/19, PR #25 `0690845` 둘 다 PASS)
+
 ### 2-1. task_submit 응답 시간 (주의)
 READY까지 약 18초, **재부팅 직후 첫 Sandbox는 1분 이상**(네트워크 스위치 생성 51초 관찰). `task_submit`이 READY까지 붙잡고 있으면 Codex 도구 호출 시간 초과에 걸릴 수 있다.
 **확정 (2026-09-29 이준원):** `task_submit`은 Sandbox 켜기를 시작만 하고 바로 `PREPARING`으로 답한다. 준비 전 `computer_*` 호출은 "아직 준비 안 됨, 다시 시도"로 답하고, Codex는 `wait_ms`로 기다렸다 다시 시도한다(이준원 확인).
@@ -63,7 +80,7 @@ READY까지 약 18초, **재부팅 직후 첫 Sandbox는 1분 이상**(네트워
 | 일 | 담당 |
 |---|---|
 | 세션 등록, token, bootstrap 내용, 인증서·개인 키, Startup Verification, READY, Heartbeat, TERMINATE | Host (이준원) |
-| 작업 폴더, Runner 패키지, .wsb(읽기 전용 매핑 2개), `wsb start`·창 열기, 켠 뒤 주소 확인, 방화벽 규칙 검사, 인증서·주소·준비 표시 전달, Guest 인증서 자동 신뢰, token 파일 삭제, 종료 확인, 정리 | Lifecycle (배주한·최정우) |
+| 작업 폴더, Runner 패키지, .wsb(읽기 전용 매핑 2개), `wsb start`·창 열기, 켠 뒤 주소 확인, 방화벽 규칙 검사, 인증서·주소·준비 표시 전달, Guest 인증서 자동 신뢰, token 파일 삭제, 종료 확인, 정리, 주인 없는 Sandbox 회수, Runner 재시작·Sandbox 재설정 실행 | Lifecycle (배주한) |
 | HELLO, GUI 캡처·입력, 스크린샷 업로드, Output 감시 | Runner |
 | 방화벽 규칙 설치·재부팅 후 재적용 (관리자 권한) | 설치 과정 (미정, 아래 5절) |
 
@@ -81,7 +98,7 @@ READY까지 약 18초, **재부팅 직후 첫 Sandbox는 1분 이상**(네트워
 | A | 방화벽 규칙: 설치 과정에 넣는 방법, **재부팅마다 풀리는 문제**(Sandbox 어댑터가 새로 생겨 규칙이 옛 어댑터에 묶임) | Lifecycle은 `start()`에서 검사하고, 안 맞으면 Sandbox를 끄고 고치는 명령을 알려 줌. 자동 재적용 방법은 팀 결정(progress 미결 14·20) |
 | B | Sandbox → LAN·인터넷 노출 | Windows 기능으로 못 막음. 팀 결정(미결 16) |
 | C | Smart App Control 켜진 PC에서 서명 없는 Runner 차단 | 끄고 재부팅하면 됨. 제품은 코드 서명 필요한지 결정(미결 19). 시연 PC 확인 |
-| D | 끊겼을 때 재시작 | Runner 제품 경로는 재연결 미지원. 지금은 세션 실패 → 정리. 재시작 규칙은 5.9에서 |
+| D | 끊겼을 때 재시작 | **Lifecycle 쪽 완료 (2026-10-02):** `restart_runner()`·`reset_sandbox()`, 2-2절. Host 쪽 연결(언제 부를지, 새 generation 받기, Action UNKNOWN, Agent 알림)은 이준원 |
 | E | Runner pinning 전환 | 4절 개선안 |
 | F | ~~task_submit 응답 방식~~ | 확정, 2-1절 |
 
