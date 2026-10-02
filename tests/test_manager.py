@@ -84,6 +84,19 @@ class FakeFirewall:
         return list(self._p)
 
 
+class FakeProcesses:
+    """pid -> creation time of live processes. A pid in `hidden` exists but cannot be inspected."""
+
+    def __init__(self):
+        self.table = {os.getpid(): 111}
+        self.hidden: set[int] = set()
+
+    def __call__(self, pid):
+        if pid in self.hidden:
+            raise OSError(5, "access denied")
+        return self.table.get(pid)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -92,6 +105,7 @@ class Base(unittest.TestCase):
         self.runner.write_bytes(b"MZ fake runner")
         self.clock = FakeClock()
         self.wsb = FakeWsb()
+        self.procs = FakeProcesses()
         self.env = mock.patch.dict(os.environ, {"OneDrive": str(Path(self.tmp.name) / "OneDrive")})
         self.env.start()
 
@@ -101,7 +115,8 @@ class Base(unittest.TestCase):
 
     def manager(self, net=None, firewall=None):
         return SandboxManager(self.root, wsb=self.wsb, network=net or FakeNet(), firewall=firewall or FakeFirewall(),
-                              clock=self.clock, sleep=self.clock.sleep, ip_wait_s=10, stop_verify_s=5)
+                              clock=self.clock, sleep=self.clock.sleep, ip_wait_s=10, stop_verify_s=5,
+                              process_started=self.procs)
 
     def started(self, m=None):
         m = m or self.manager()
@@ -398,6 +413,120 @@ class Concurrency(Base):
         with self.assertRaises(SandboxManagerError):
             m.start(s)
         self.assertEqual((s.state, self.wsb.live), (FAILED, set()))
+
+
+class Orphans(Base):
+    """The Host died (Codex closed or killed) before stop(): the next start() must not fail forever."""
+
+    DEAD_PID = 424242
+
+    def left_running(self, owner=None):
+        """A RUNNING session whose Host process is gone: bootstrap token still in the workspace."""
+        m, s = self.started()
+        self.host_writes_bootstrap(s)
+        m.publish_bootstrap(s, CERT)
+        d = json.loads((s.dir / "state.json").read_text(encoding="utf-8"))
+        d["owner"] = owner if owner is not None else {"pid": self.DEAD_PID, "started": 5}
+        if owner == {}:
+            del d["owner"]                                      # record from before owners existed
+        (s.dir / "state.json").write_text(json.dumps(d), encoding="utf-8")
+        return s
+
+    def next_start(self):
+        m = self.manager()                                      # the new Host process
+        s = m.prepare("SES-20260929-002", "RT-SBX-001", 1, self.runner)
+        return m, s
+
+    def test_owner_recorded(self):
+        m, s = self.started()
+        self.assertEqual(s.owner, {"pid": os.getpid(), "started": 111})
+        m.stop(s, "TASK_COMPLETE")
+
+    def test_orphan_reclaimed_then_start_succeeds(self):
+        old = self.left_running()
+        m, s = self.next_start()
+        self.assertEqual(m.start(s), "192.168.208.1")
+        again = m.load(old.session_id)
+        self.assertEqual((again.state, again.termination_reason), (TERMINATED, "RUNTIME_ERROR"))
+        self.assertIn("ORPHAN_RECLAIMED", [e["kind"] for e in again.events])
+        self.assertFalse(old.bootstrap_path.exists())           # the leftover token is gone too
+        self.assertFalse(old.package_dir.exists())
+        self.assertEqual(len(self.wsb.started_xml), 2)
+        m.stop(s, "TASK_COMPLETE")
+
+    def test_live_owner_is_left_alone(self):
+        m1, first = self.started()                              # its Host (this process) is alive
+        m, s = self.next_start()
+        self.assertCode("RUNTIME_UNAVAILABLE", m.start, s)
+        self.assertEqual(m.load(first.session_id).state, STARTED)
+        self.assertIn(SBX, self.wsb.live)
+        m1.stop(first, "TASK_COMPLETE")
+
+    def test_pid_reused_by_another_process(self):
+        self.left_running(owner={"pid": os.getpid(), "started": 99})   # same PID, different creation time
+        m, s = self.next_start()
+        m.start(s)
+        self.assertEqual(s.state, STARTED)
+        m.stop(s, "TASK_COMPLETE")
+
+    def test_owner_that_cannot_be_inspected_counts_as_alive(self):
+        old = self.left_running()
+        self.procs.hidden.add(self.DEAD_PID)
+        m, s = self.next_start()
+        self.assertCode("RUNTIME_UNAVAILABLE", m.start, s)
+        self.assertEqual(m.load(old.session_id).state, RUNNING)
+
+    def test_record_without_owner_is_reclaimed(self):
+        old = self.left_running(owner={})
+        m, s = self.next_start()
+        m.start(s)
+        self.assertEqual(m.load(old.session_id).state, TERMINATED)
+        m.stop(s, "TASK_COMPLETE")
+
+    def test_sandbox_already_closed_by_hand(self):
+        old = self.left_running()
+        self.wsb.live.clear()                                   # user closed the window; record still says RUNNING
+        m = self.manager()
+        self.assertEqual(m.reclaim_orphans(), [old.session_id])
+        self.assertEqual(m.load(old.session_id).state, TERMINATED)
+        self.assertFalse(old.bootstrap_path.exists())
+
+    def test_orphan_that_will_not_stop_blocks_start(self):
+        old = self.left_running()
+        self.wsb.stop_works = False
+        m, s = self.next_start()
+        self.assertCode("RUNTIME_UNAVAILABLE", m.start, s)
+        self.assertNotEqual(m.load(old.session_id).state, TERMINATED)   # never claimed without proof
+        self.assertEqual(s.state, PREPARED)
+
+    def test_unrecorded_sandbox_is_refused_not_stopped(self):
+        stranger = "99999999-2222-3333-4444-555555555555"
+        self.wsb.live.add(stranger)
+        m, s = self.next_start()
+        err = self.assertCode("RUNTIME_UNAVAILABLE", m.start, s)
+        self.assertIn(stranger, self.wsb.live)
+        self.assertIn("close it first", err.message)
+
+    def test_finished_and_broken_records_are_ignored(self):
+        m1, done = self.started()
+        m1.stop(done, "TASK_COMPLETE")
+        broken = self.root / "sessions" / "SES-BROKEN"
+        broken.mkdir(parents=True)
+        (broken / "state.json").write_text("{not json", encoding="utf-8")
+        m = self.manager()
+        self.assertEqual(m.reclaim_orphans(), [])
+        self.assertEqual(m.load(done.session_id).events[-1]["kind"], "STATE")   # nothing appended
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows process API")
+class RealProcess(unittest.TestCase):
+    def test_own_process_and_exited_process(self):
+        import subprocess
+        from sandbox_manager.process import process_started
+        self.assertIsInstance(process_started(os.getpid()), int)
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        self.assertIsNone(process_started(p.pid))
 
 
 class Firewall(unittest.TestCase):

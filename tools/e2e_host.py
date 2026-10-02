@@ -97,9 +97,12 @@ def main() -> int:
                         ready.set()
                     elif "broker demo complete" in line:
                         done.set()
-                    elif "STARTUP FAILED" in line or "demo stopped" in line or "Traceback" in line:
+                    # No "Traceback" check: asyncio on Windows logs a harmless ConnectionResetError traceback
+                    # when the Runner hangs up. A real crash ends the Host without "broker demo complete",
+                    # which the failed.set() below catches.
+                    elif "STARTUP FAILED" in line or "demo stopped" in line:
                         failed.set()
-            failed.set()
+            failed.set()                                      # Host exited
 
         threading.Thread(target=pump, daemon=True).start()
 
