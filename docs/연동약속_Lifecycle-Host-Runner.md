@@ -54,6 +54,21 @@ Host 프로세스 종료(Codex가 끔)
 - 오류는 `SandboxManagerError.code`: `INVALID_ARGUMENT` / `RUNTIME_UNAVAILABLE` / `RUNTIME_START_FAILED`. `start()`가 실패하면 Sandbox는 이미 꺼져 있다(FAILED)
 - `publish_bootstrap`에는 Host가 bootstrap에 실제로 넣은 인증서 PEM을 넘긴다(개인 키가 섞이면 거부)
 
+### 2-3. 사용자 파일 넣기 (2026-10-04 Lifecycle 추가, Host 연결 필요)
+
+```
+Agent: task_submit (+ 넣을 파일 경로)
+  Host  : 넣어도 되는 파일인지 판단 (정책: 비밀번호·브라우저 저장 정보·시스템 폴더 등 거부)
+  Host  → s = sm.prepare(session_id, runtime_id, generation, runner_exe, input_files=[경로, ...])
+  Host  : Agent에게 s.guest_input_paths (예: C:\UserFiles\견적서.xlsx) 를 알려 줌
+  ... 이후는 2절과 같음 (start → publish_bootstrap → READY → mark_ready → ...)
+```
+
+- 원본은 연결하지 않고 복사본만, Sandbox 안 `C:\UserFiles`에 **읽기 전용**. 고친 결과를 꺼내는 건 Artifact Broker 경로(여기 아님)
+- Sandbox Manager가 거부하는 것(`INVALID_ARGUMENT`): 없는 파일, 폴더, 바로가기·링크, 같은 이름 두 개, 파일당 50 MiB·합계 200 MiB 초과
+- 기록에는 이름·크기·SHA-256만 남고 원래 경로는 남지 않음
+- **Host가 할 일**: `task_submit`에 파일 칸 추가, 넣어도 되는지 판단, `prepare(..., input_files=...)`로 넘기기, Agent에게 Sandbox 안 경로 알려 주기
+
 ### 2-2. Host가 살아 있을 때 복구 (2026-10-02 Lifecycle 추가, Host 연결은 이준원)
 
 ```

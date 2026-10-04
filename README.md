@@ -48,6 +48,21 @@ m.stop(s, "TASK_COMPLETE")                             # 또는 emergency=True
 m.cleanup(s)
 ```
 
+### 사용자 파일 넣기 (선택)
+
+```python
+s = m.prepare(session_id, runtime_id, generation, runner_exe,
+              input_files=[r"C:\Users\me\Documents\견적서.xlsx"])   # 넣어도 되는 파일인지는 Host가 먼저 판단
+s.guest_input_paths   # ['C:\\UserFiles\\견적서.xlsx'] → Agent에게 "이 경로의 파일을 열어"라고 알려 줌
+```
+
+- 원본을 연결하지 않고 **복사본**을 세션 작업 폴더에 두고 Sandbox 안 `C:\UserFiles`에 **읽기 전용**으로 보여 줌. Sandbox 안에서 만들기·고치기·지우기 모두 실패(실제 Sandbox 확인)
+- 거부: 없는 파일, 폴더, 바로가기·링크, 같은 이름 두 개(대소문자 무시), 파일당 50 MiB·합계 200 MiB 초과 → `INVALID_ARGUMENT`, 작업 폴더를 만들기 전에 거부
+- `state.json`에는 이름·크기·SHA-256만 남기고 **원래 경로는 남기지 않음**(민감할 수 있음). `cleanup()`이 복사본 삭제
+- `reset_sandbox()`로 새 Sandbox가 떠도 같은 파일이 다시 보임
+- **결과 파일 꺼내기는 여기 없음** — Artifact Broker(검사 후 반출) 경로. 쓰기 가능한 연결 폴더는 만들지 않음
+- 파일을 안 넘기면 지금과 똑같음(연결 폴더 2개)
+
 ### Host가 살아 있을 때 복구 (언제 할지는 Host가 정함)
 
 ```python
@@ -89,6 +104,7 @@ address = m.reset_sandbox(s, s.generation + 1)         # start()처럼 새 Host 
 | `tests/test_isolation.py` | 격리 우회 시도 13개: 연결 폴더 안 junction·symlink·hard link(켜기 전·켠 뒤), 폴더 바꿔치기, 사용자 폴더·브라우저 프로필 직접 지정, `..` 탈출, .wsb에 Host 경로 새는지 |
 | `tools/smoke_real.py` | 실제 Sandbox로 Manager 단독 시험 (Host 없음) |
 | `tools/e2e_host.py` | 실제 Host(`sender.py --demo broker`) + 실제 Runner 전체 왕복. host_control venv로 실행 |
+| `tools/input_files_probe.py` | 실제 Sandbox로 사용자 파일 넣기 확인: 복사본 2개(한글 이름 포함)가 `C:\UserFiles`에 보이고 내용 일치, 만들기·고치기·지우기 실패, 정리 후 남음 없음. Host 불필요 |
 | `tools/recovery_e2e.py` | 실제 Host·Runner로 복구 시험: READY 뒤 Host 강제 종료 → `restart_runner()` 후 같은 Sandbox에서 데모 완료 → `reset_sandbox()` 후 새 Sandbox에서 데모 완료 → 남은 Sandbox 없음. host_control venv로 실행 |
 | `tools/mcp_e2e.py` | Codex 역할: host_control `mcp_server.py`를 MCP stdio로 불러 task_submit → observe → click → type → session_stop, 끝난 뒤 Sandbox 남음 없음 확인. host_control venv로 실행 |
 | `tools/repeat_e2e.py` | `e2e_host.py`를 N회 연속 실행하고 회차 사이 남은 Sandbox·인증서·세션 파일 검사 (5.9) |
@@ -105,7 +121,8 @@ python tools/smoke_real.py <sandbox_runner.exe>
 
 | 시험 | 결과 (2026-09-29, KISIA PC) |
 |---|---|
-| 자동 시험 | 69/69 통과 (`test_manager` 56: 동시 호출·주인 없는 Sandbox 회수·Runner 재시작·Sandbox 재설정 포함, `test_isolation` 13) |
+| 자동 시험 | 77개 통과·1개 건너뜀 (`test_manager` 64: 동시 호출·주인 없는 Sandbox 회수·Runner 재시작·Sandbox 재설정·사용자 파일 넣기 포함, `test_isolation` 13. 링크 거부 시험은 symlink 권한이 없는 PC에서 건너뜀) |
+| **사용자 파일 넣기** (JH PC 2026-10-04, `tools/input_files_probe.py`) | **PASS** — 복사본 2개가 Sandbox `C:\UserFiles`에 보이고 SHA-256 일치, 만들기·고치기·지우기 모두 실패, 정리 후 `input` 삭제 |
 | **Runner 재시작·Sandbox 재설정** (JH PC 2026-10-02, `tools/recovery_e2e.py`, Runner develop `452e1b5`) | **PASS** — host_control feat/19(11칸) 44.8초, PR #25 `0690845`(12칸, `--advertise-address`) 46.6초. 재시작 후 READY까지 약 2초(같은 Sandbox), 재설정 후 새 Sandbox에서 데모 완료, 끝난 뒤 Sandbox 0 |
 | **Host 강제 종료 후 회수** (JH PC, READY 직후 `taskkill /F /T` → 다음 `e2e_host.py`) | **PASS.** Sandbox가 남은 것을 확인 → 다음 `start()`가 `ORPHAN_RECLAIMED` → 종료 확인 1.67초·정리 → 새 세션 PASS, 끝난 뒤 Sandbox 0 |
 | **반복 안정성 10회** (`tools/repeat_e2e.py --runs 10`, 실제 Host·Runner) | **10/10 PASS, 흔적 0.** READY 18.3~20.1초(평균 19.3), 종료 확인 1.74~1.87초(평균 1.81), 회당 약 24초. 매 회차 뒤 Sandbox·인증서·개인 키·세션 파일 남음 없음 |
