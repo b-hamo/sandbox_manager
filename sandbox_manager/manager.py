@@ -121,6 +121,9 @@ class SandboxSession:
     termination_reason: str | None = None
     owner: dict | None = None                    # {"pid", "started"} of the Host process that prepared it
     restarts: int = 0                            # restart_runner() + reset_sandbox() calls so far
+    # Copies of user files the task needs: [{"name", "size", "sha256"}]. The source path is not kept:
+    # it can be sensitive, and the Guest only ever sees the copy.
+    input_files: list = field(default_factory=list)
     timings: dict = field(default_factory=dict)
     events: list = field(default_factory=list)
 
@@ -144,6 +147,15 @@ class SandboxSession:
     @property
     def wsb_path(self) -> Path:
         return self.dir / "sandbox.wsb"
+
+    @property
+    def input_dir(self) -> Path:
+        return self.dir / "input"
+
+    @property
+    def guest_input_paths(self) -> list[str]:
+        """Where the Guest sees each input file (read-only), to tell the Agent."""
+        return [f"{config.GUEST_INPUT}\\{f['name']}" for f in self.input_files]
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -271,8 +283,15 @@ class SandboxManager:
         return reclaimed
 
     # ------------------------------------------------------------------ lifecycle
-    def prepare(self, session_id: str, runtime_id: str, generation: int, runner_exe: Path) -> SandboxSession:
-        """Create the session workspace with the Runner package. Starts nothing."""
+    def prepare(self, session_id: str, runtime_id: str, generation: int, runner_exe: Path, *,
+                input_files: list | None = None) -> SandboxSession:
+        """Create the session workspace with the Runner package. Starts nothing.
+
+        input_files: user files the task needs. Each is COPIED into the workspace and shown to the
+        Guest read-only under config.GUEST_INPUT (s.guest_input_paths); the original is never mapped.
+        Whether a file may be handed over at all is the Host's policy decision; this only refuses
+        what cannot be copied safely.
+        """
         for value, what in ((session_id, "session_id"), (runtime_id, "runtime_id")):
             if not isinstance(value, str) or not ID_RE.match(value):
                 raise SandboxManagerError(INVALID_ARGUMENT, f"bad {what} {value!r}")
@@ -281,11 +300,38 @@ class SandboxManager:
         runner_exe = Path(runner_exe)
         if not runner_exe.is_file():
             raise SandboxManagerError(INVALID_ARGUMENT, f"Runner exe not found: {runner_exe}")
+        sources = self._check_inputs(input_files or [])
 
         with self._lock_for(session_id):
-            return self._prepare_locked(session_id, runtime_id, generation, runner_exe)
+            return self._prepare_locked(session_id, runtime_id, generation, runner_exe, sources)
 
-    def _prepare_locked(self, session_id: str, runtime_id: str, generation: int, runner_exe: Path) -> SandboxSession:
+    @staticmethod
+    def _check_inputs(files: list) -> list[Path]:
+        sources, names, total = [], set(), 0
+        for f in files:
+            p = Path(f)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                raise SandboxManagerError(INVALID_ARGUMENT, f"input file not found: {p}") from None
+            if p.is_symlink() or getattr(st, "st_file_attributes", 0) & config.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise SandboxManagerError(INVALID_ARGUMENT, f"input file is a link: {p}")
+            if not p.is_file():
+                raise SandboxManagerError(INVALID_ARGUMENT, f"input must be a regular file, not a folder: {p}")
+            if p.name.lower() in names:                     # Windows names are case-insensitive
+                raise SandboxManagerError(INVALID_ARGUMENT, f"two input files are both named {p.name!r}")
+            if st.st_size > config.INPUT_FILE_MAX:
+                raise SandboxManagerError(INVALID_ARGUMENT,
+                                          f"input file {p.name!r} is {st.st_size} bytes (limit {config.INPUT_FILE_MAX})")
+            total += st.st_size
+            if total > config.INPUT_TOTAL_MAX:
+                raise SandboxManagerError(INVALID_ARGUMENT, f"input files exceed {config.INPUT_TOTAL_MAX} bytes in total")
+            names.add(p.name.lower())
+            sources.append(p)
+        return sources
+
+    def _prepare_locked(self, session_id: str, runtime_id: str, generation: int, runner_exe: Path,
+                        sources: list[Path]) -> SandboxSession:
         directory = self.root / "sessions" / session_id
         if directory.exists():
             raise SandboxManagerError(INVALID_ARGUMENT, f"session {session_id} already exists")
@@ -298,8 +344,31 @@ class SandboxManager:
         (s.package_dir / config.START_SCRIPT).write_text(config.START_PS1, encoding="utf-8-sig")
         (s.package_dir / config.RESTART_SCRIPT).write_text(config.RESTART_PS1, encoding="utf-8-sig")
         s.runner_sha256 = _sha256(s.package_dir / config.RUNNER_NAME)   # J-3: this session runs this exact build
+        if sources:
+            try:
+                self._copy_inputs(s, sources)
+            except (OSError, SandboxManagerError) as exc:
+                shutil.rmtree(directory, ignore_errors=True)  # nothing half-prepared is left behind
+                if isinstance(exc, SandboxManagerError):
+                    raise
+                raise SandboxManagerError(INVALID_ARGUMENT, f"could not copy input file: {exc}") from None
         self._event(s, "PREPARED", runner_sha256=s.runner_sha256)
         return s
+
+    def _copy_inputs(self, s: SandboxSession, sources: list[Path]) -> None:
+        s.input_dir.mkdir()
+        total = 0
+        for src in sources:
+            dst = s.input_dir / src.name
+            shutil.copyfile(src, dst)                         # a new file: no link back to the original
+            size = dst.stat().st_size
+            total += size
+            if size > config.INPUT_FILE_MAX or total > config.INPUT_TOTAL_MAX:   # it grew after the check
+                raise SandboxManagerError(INVALID_ARGUMENT, f"input file {src.name!r} grew past the size limit")
+            s.input_files.append({"name": src.name, "size": size, "sha256": _sha256(dst)})
+        config.check_contents(s.input_dir)
+        self._event(s, "INPUT_FILES_COPIED", count=len(s.input_files), total_bytes=total,
+                    names=[f["name"] for f in s.input_files])
 
     @_locked
     def start(self, s: SandboxSession) -> str:
@@ -316,9 +385,10 @@ class SandboxManager:
             raise SandboxManagerError(RUNTIME_UNAVAILABLE, f"a Windows Sandbox is already running: {sorted(running)}"
                                       " (in use by another live Host, or not started by Sandbox Manager; close it first)")
 
-        xml = config.build_wsb(
-            [config.Mapping(s.package_dir, config.GUEST_PACKAGE), config.Mapping(s.bootstrap_dir, config.GUEST_BOOTSTRAP)],
-            config.logon_command(), workspace=s.dir)
+        mappings = [config.Mapping(s.package_dir, config.GUEST_PACKAGE), config.Mapping(s.bootstrap_dir, config.GUEST_BOOTSTRAP)]
+        if s.input_files:
+            mappings.append(config.Mapping(s.input_dir, config.GUEST_INPUT))
+        xml = config.build_wsb(mappings, config.logon_command(), workspace=s.dir)
         s.wsb_path.write_text(xml, encoding="utf-8")        # no secrets in it; kept until cleanup for audit
         self._state(s, STARTING)
         try:
@@ -384,7 +454,7 @@ class SandboxManager:
 
         (s.bootstrap_dir / config.CERT_NAME).write_bytes(cert_der)
         (s.bootstrap_dir / config.ADDRESS_NAME).write_text(s.host_address, encoding="ascii")
-        for mapped in (s.package_dir, s.bootstrap_dir):     # files arrived after start()'s check
+        for mapped in (s.package_dir, s.bootstrap_dir) + ((s.input_dir,) if s.input_files else ()):   # re-check
             config.check_contents(mapped)
         s.ready_path.write_text("", encoding="ascii")
         self._mark(s, "bootstrap_published")
@@ -511,7 +581,7 @@ class SandboxManager:
         if s.state not in (TERMINATED, FAILED, PREPARED):
             raise SandboxManagerError(INVALID_ARGUMENT, f"session is {s.state}; stop it first")
         removed, failed = [], []
-        for target in (s.bootstrap_dir, s.package_dir, s.wsb_path):
+        for target in (s.bootstrap_dir, s.package_dir, s.input_dir, s.wsb_path):
             if not target.exists():
                 continue
             try:

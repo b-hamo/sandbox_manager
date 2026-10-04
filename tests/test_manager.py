@@ -651,6 +651,107 @@ class Recovery(Base):
         self.assertNotIn(SBX, self.wsb.live)
 
 
+class InputFiles(Base):
+    """prepare(input_files=...): user files reach the Guest only as read-only copies in the workspace."""
+
+    def make(self, name, data=b"hello"):
+        p = Path(self.tmp.name) / "user" / name
+        p.parent.mkdir(exist_ok=True)
+        p.write_bytes(data)
+        return p
+
+    def test_copies_are_mapped_read_only(self):
+        a, b = self.make("견적서.xlsx", b"x" * 1000), self.make("memo.txt")
+        m = self.manager()
+        s = m.prepare("SES-1", "RT-SBX-001", 1, self.runner, input_files=[a, str(b)])
+        self.assertEqual([f["name"] for f in s.input_files], ["견적서.xlsx", "memo.txt"])
+        self.assertEqual(s.input_files[0]["size"], 1000)
+        self.assertRegex(s.input_files[0]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual((s.input_dir / "memo.txt").read_bytes(), b"hello")
+        self.assertEqual(s.guest_input_paths, [config.GUEST_INPUT + "\\견적서.xlsx", config.GUEST_INPUT + "\\memo.txt"])
+        m.start(s)
+        xml = self.wsb.started_xml[0]
+        hosts = re.findall(r"<HostFolder>(.*?)</HostFolder>", xml)
+        self.assertIn(str(s.input_dir.resolve()), hosts)
+        self.assertNotIn(str(a.parent), hosts)                    # the user's own folder is never mapped
+        self.assertEqual(xml.count("<ReadOnly>true</ReadOnly>"), 3)
+        self.assertNotIn("<ReadOnly>false", xml)
+        self.assertIn(f"<SandboxFolder>{config.GUEST_INPUT}</SandboxFolder>", xml)
+        m.stop(s, "TASK_COMPLETE")
+
+    def test_original_is_untouched_by_changes_to_the_copy(self):
+        a = self.make("a.txt", b"original")
+        m = self.manager()
+        s = m.prepare("SES-1", "RT-SBX-001", 1, self.runner, input_files=[a])
+        (s.input_dir / "a.txt").write_bytes(b"changed")
+        self.assertEqual(a.read_bytes(), b"original")
+        self.assertEqual(os.stat(s.input_dir / "a.txt").st_nlink, 1)   # a real copy, not a hard link
+
+    def test_no_inputs_means_no_extra_mapping(self):
+        m, s = self.started()
+        self.assertEqual(self.wsb.started_xml[0].count("<MappedFolder>"), 2)
+        self.assertFalse(s.input_dir.exists())
+        self.assertEqual(s.guest_input_paths, [])
+        m.stop(s, "TASK_COMPLETE")
+
+    def test_refusals(self):
+        m = self.manager()
+        folder = Path(self.tmp.name) / "afolder"
+        folder.mkdir()
+        dup1, dup2 = self.make("Same.txt"), Path(self.tmp.name) / "other" / "same.TXT"
+        dup2.parent.mkdir()
+        dup2.write_bytes(b"x")
+        for bad in ([Path(self.tmp.name) / "missing.txt"], [folder], [dup1, dup2]):
+            self.assertCode("INVALID_ARGUMENT", m.prepare, "SES-1", "RT-SBX-001", 1, self.runner, input_files=bad)
+        self.assertFalse((self.root / "sessions" / "SES-1").exists())   # refused before anything was created
+
+    def test_size_limits(self):
+        big = self.make("big.bin", b"x" * 11)
+        with mock.patch.object(config, "INPUT_FILE_MAX", 10):
+            self.assertCode("INVALID_ARGUMENT", self.manager().prepare, "SES-1", "RT-SBX-001", 1, self.runner,
+                            input_files=[big])
+        files = [self.make(f"f{i}.bin", b"x" * 6) for i in range(3)]
+        with mock.patch.object(config, "INPUT_TOTAL_MAX", 15):
+            self.assertCode("INVALID_ARGUMENT", self.manager().prepare, "SES-1", "RT-SBX-001", 1, self.runner,
+                            input_files=files)
+
+    @unittest.skipUnless(sys.platform == "win32", "symlink creation")
+    def test_link_is_refused(self):
+        target = self.make("secret.txt")
+        link = Path(self.tmp.name) / "user" / "link.txt"
+        try:
+            os.symlink(target, link)
+        except OSError:
+            self.skipTest("symlinks need Developer Mode or admin")
+        self.assertCode("INVALID_ARGUMENT", self.manager().prepare, "SES-1", "RT-SBX-001", 1, self.runner,
+                        input_files=[link])
+
+    def test_state_keeps_no_source_path_and_cleanup_removes_copies(self):
+        a = self.make("private-name.txt")
+        m = self.manager()
+        s = m.prepare("SES-1", "RT-SBX-001", 1, self.runner, input_files=[a])
+        m.start(s)
+        m.stop(s, "TASK_COMPLETE")
+        state = (s.dir / "state.json").read_text(encoding="utf-8")
+        self.assertNotIn(str(a.parent), state)
+        self.assertIn("private-name.txt", state)
+        self.assertIn("input", m.cleanup(s)["removed"])
+        self.assertFalse(s.input_dir.exists())
+        self.assertEqual(m.load(s.session_id).input_files[0]["name"], "private-name.txt")
+
+    def test_reset_sandbox_keeps_the_inputs(self):
+        a = self.make("a.txt")
+        m = self.manager()
+        s = m.prepare("SES-1", "RT-SBX-001", 1, self.runner, input_files=[a])
+        m.start(s)
+        self.host_writes_bootstrap(s)
+        m.publish_bootstrap(s, CERT)
+        m.reset_sandbox(s, 2)
+        self.assertIn(f"<SandboxFolder>{config.GUEST_INPUT}</SandboxFolder>", self.wsb.started_xml[1])
+        self.assertTrue((s.input_dir / "a.txt").is_file())
+        m.stop(s, "TASK_COMPLETE")
+
+
 class WsbExec(unittest.TestCase):
     def test_exit_code_from_text(self):
         from sandbox_manager.wsb import WsbCli

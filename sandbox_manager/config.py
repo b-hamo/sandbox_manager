@@ -6,6 +6,7 @@ Rules (CLAUDE.md "절대 하지 않는 것"):
   profiles, Safe Results, or Host output)
 - nothing inside a mapped folder may lead elsewhere on the Host: no junction, symlink or other
   reparse point, and no hard-linked file (tests/test_isolation.py)
+- user files reach the Guest only as copies inside the workspace, never by mapping the user's folder
 - Clipboard, printer, audio and video redirection are off
 - Networking stays on for the control channel. This is NOT isolation (미결 16)
 """
@@ -21,6 +22,10 @@ from .errors import INVALID_ARGUMENT, SandboxManagerError
 
 GUEST_PACKAGE = r"C:\RunnerPackage"
 GUEST_BOOTSTRAP = r"C:\RunnerBootstrap"
+# User files the task needs, as read-only copies (prepare(input_files=...)). Mapped only when there are any.
+GUEST_INPUT = r"C:\UserFiles"
+INPUT_FILE_MAX = 50 * 1024 * 1024       # same limits as Artifacts (SCRP): 50 MiB per file,
+INPUT_TOTAL_MAX = 200 * 1024 * 1024     # 200 MiB per session
 RUNNER_NAME = "sandbox_runner.exe"
 START_SCRIPT = "start.ps1"
 RESTART_SCRIPT = "restart.ps1"
