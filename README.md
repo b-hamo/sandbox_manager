@@ -21,7 +21,7 @@ from sandbox_manager import SandboxManager, SandboxManagerError
 | 한다 | 안 한다 (다른 담당) |
 |---|---|
 | 세션 작업 폴더, Runner 패키지(exe·시작 스크립트) 준비 | token 발급, bootstrap 내용 작성 (Host) |
-| .wsb 생성: 읽기 전용 매핑 2개만, 클립보드·프린터·오디오·비디오 끔 | 인증서·개인 키 생성 (Host) |
+| .wsb 생성: 읽기 전용 매핑만(기본 2개, 선택: 사용자 파일 사본·받는 폴더), 클립보드·프린터·오디오·비디오 끔 | 인증서·개인 키 생성 (Host) |
 | `wsb start` + 창 열기(LogonCommand 실행 조건) | HELLO 검사, Startup Verification, READY 판정 (Host) |
 | **켠 뒤** Host 주소(vSwitch IPv4) 확인, LAN 경로면 거부 | Heartbeat, Action 전달 (Host·Runner) |
 | 방화벽 규칙이 지금 어댑터에 묶여 있는지 검사 | GUI 캡처·입력 (Runner) |
@@ -62,6 +62,31 @@ s.guest_input_paths   # ['C:\\UserFiles\\견적서.xlsx'] → Agent에게 "이 �
 - `reset_sandbox()`로 새 Sandbox가 떠도 같은 파일이 다시 보임
 - **결과 파일 꺼내기는 여기 없음** — Artifact Broker(검사 후 반출) 경로. 쓰기 가능한 연결 폴더는 만들지 않음
 - 파일을 안 넘기면 지금과 똑같음(연결 폴더 2개)
+- **바뀐 파일 거부 (2026-10-08):** `register_input(path, source=URL)`로 다 받아진 파일을 등록하면 그때의 크기·SHA-256·출처가 고정되고(`InputFile`), `prepare(input_files=[등록한 것])`가 복사본이 다르면 거부한다. 받는 중 이름(`.crdownload`·`.part` 등)은 등록 거부
+- Sandbox 안에서는 지킴이(`input_watch.ps1`)가 `C:\UserFiles`의 파일을 바탕화면 `Input`으로 복사하고 크기·SHA-256을 다시 비교한다(아래 "받는 폴더"와 같은 지킴이)
+
+### 받는 폴더(inbox): Agent가 받은 파일을 Sandbox에서 실행 (선택, 2026-10-08)
+
+```python
+from sandbox_manager.inbox import InboxWatcher, check_inbox_root
+
+inbox = check_inbox_root(r"C:\Users\me\SecureCUA\codex-work\inbox")   # 먼저 tools/setup_inbox.ps1 한 번
+s = m.prepare(session_id, runtime_id, generation, runner_exe, inbox=inbox)
+watcher = InboxWatcher(m, s); watcher.start()          # 1초마다 m.scan_inbox(s)
+# ... start → publish_bootstrap → READY ... (그대로)
+watcher.stop(); m.stop(s, "TASK_COMPLETE"); m.cleanup(s)   # cleanup은 받는 폴더를 지우지 않음
+```
+
+- 고정된 Host 폴더 **자체**를 Sandbox `C:\Inbox`에 **읽기 전용**으로 연결한다(배주한 결정: 사본 아님, 승인 없음). Sandbox가 켜진 뒤 들어온 파일도 보인다(실제 Sandbox 확인)
+- 폴더 조건(`check_inbox_root`, 아니면 `INVALID_ARGUMENT`): 절대 경로, 링크 아님, 드라이브 최상위·사용자 프로필 자체 아님, 문서·바탕화면·다운로드·사진·AppData·`.ssh`·`.codex` 등 사용자 폴더 안 아님, OneDrive 아님, 작업 폴더와 안 겹침
+- `scan_inbox(s)` (InboxWatcher가 부름):
+  - 다 받아진 파일만 목록(`package\inputs.json`)에 올린다: 받는 중 이름 아님, 아무도 쓰고 있지 않음, 크기·시각이 2초 동안 그대로, 파일당 50 MiB·합계 200 MiB·200개 이하. 하위 폴더는 4단계까지
+  - **junction·symlink·hard link가 보이면 링크만 지운다**(가리키는 원본은 그대로). 켤 때 이미 있으면 `start()`가 거부
+  - 바뀐 파일은 새 SHA-256으로 다시 올린다. 이벤트: `INBOX_FILE_REGISTERED` / `_CHANGED` / `_GONE` / `_SKIPPED`, `INBOX_LINK_REMOVED`, `INBOX_HARDLINK_REMOVED`
+- Sandbox 안 지킴이(`input_watch.ps1`, 시작 스크립트가 Runner보다 먼저 띄움, 1초마다): 목록의 파일을 바탕화면 `Input`에 복사하고 **복사 전후 크기·SHA-256**을 목록과 비교 → `Desktop\input-check.txt`·`.html`에 `OK`/`FAIL`, 다르면 사본 삭제. 실행은 하지 않는다(실행은 Agent가 SCRP GUI 도구로). Sandbox엔 메모장이 없어 결과는 Edge로 여는 html도 만든다
+- 받는 폴더에서 Host가 실행하지 못하게: `tools/setup_inbox.ps1`(관리자 아님)이 폴더 안 파일마다 **Everyone 실행 거부** + OWNER RIGHTS(만든 사람도 권한을 못 바꿈)를 건다
+- 내려받기는 Host 몫이다(명세). 시연용으로 `tools/inbox_download.py`(https·공개 주소만, 50 MiB, zip 경로 검사)와 host_control을 고치지 않고 붙이는 `tools/host_with_inputs.py --inbox`가 있다. 정식 연결은 이준원(제안서 2026-10-08)
+- Codex에게 절차를 알려 주는 Skill: `codex_skill/secure-sandbox-run/SKILL.md` (`~/.codex/skills/`에 복사)
 
 ### Host가 살아 있을 때 복구 (언제 할지는 Host가 정함)
 
@@ -95,7 +120,9 @@ address = m.reset_sandbox(s, s.generation + 1)         # start()처럼 새 Host 
 | 파일 | 역할 |
 |---|---|
 | `sandbox_manager/manager.py` | 본체. prepare, start, publish_bootstrap, mark_ready, is_running, stop, cleanup, load |
-| `sandbox_manager/config.py` | .wsb 생성과 매핑 안전 검사, Guest 시작 스크립트 |
+| `sandbox_manager/config.py` | .wsb 생성과 매핑 안전 검사, Guest 시작 스크립트, Guest 파일 지킴이(`INPUT_WATCH_PS1`) |
+| `sandbox_manager/inputs.py` | 파일 등록 `register_input()` (다 받아진 파일만, 크기·SHA-256·출처 고정) |
+| `sandbox_manager/inbox.py` | 받는 폴더: `check_inbox_root()`, `InboxScanner`(다 받아진 파일 목록·링크 삭제), `InboxWatcher` |
 | `sandbox_manager/firewall.py` | Host 방화벽 규칙이 현재 어댑터에 묶였는지, 17443·17444 허용·나머지 차단인지 검사(읽기만) |
 | `sandbox_manager/wsb.py` | `wsb` CLI 감싸기 (start, running, ip, connect, stop, exec — exec는 Runner 재시작 고정 명령에만) |
 | `sandbox_manager/network.py` | vSwitch 주소, Guest로 가는 Host 주소 |
@@ -108,6 +135,11 @@ address = m.reset_sandbox(s, s.generation + 1)         # start()처럼 새 Host 
 | `tools/recovery_e2e.py` | 실제 Host·Runner로 복구 시험: READY 뒤 Host 강제 종료 → `restart_runner()` 후 같은 Sandbox에서 데모 완료 → `reset_sandbox()` 후 새 Sandbox에서 데모 완료 → 남은 Sandbox 없음. host_control venv로 실행 |
 | `tools/mcp_e2e.py` | Codex 역할: host_control `mcp_server.py`를 MCP stdio로 불러 task_submit → observe → click → type → session_stop, 끝난 뒤 Sandbox 남음 없음 확인. host_control venv로 실행 |
 | `tools/repeat_e2e.py` | `e2e_host.py`를 N회 연속 실행하고 회차 사이 남은 Sandbox·인증서·세션 파일 검사 (5.9) |
+| `tests/test_guest_scripts.py` | Guest 파일 지킴이를 이 PC의 Windows PowerShell 5.1로 실제 실행(경로만 임시 폴더로): 여러 항목·하위 폴더·해시 불일치·`..` 이름 |
+| `tools/setup_inbox.ps1` | 받는 폴더 만들기 + 실행 거부 권한 + Host에서 실행 안 되는지 확인 (관리자 아님) |
+| `tools/inbox_download.py` | (시연용, Host 몫) https 공개 주소에서 받는 폴더로 내려받기, zip 풀기 |
+| `tools/host_with_inputs.py` | (시연용) host_control `mcp_server.py`를 고치지 않고 감싸서 `--input`(승인 창 뒤 사본) 또는 `--inbox`(받는 폴더 + `inbox_download` 도구)를 붙임 |
+| `codex_skill/secure-sandbox-run/SKILL.md` | Codex Skill: 받기 → Sandbox → `input-check.html` 확인 → Sandbox 안에서 실행 절차 |
 | `tools/install_firewall.ps1` / `uninstall_firewall.ps1` | 방화벽 규칙 + 재부팅 후 자동 복구 예약 작업 설치/제거 (관리자, 한 번) |
 
 ## 시험
@@ -121,7 +153,9 @@ python tools/smoke_real.py <sandbox_runner.exe>
 
 | 시험 | 결과 (2026-09-29, KISIA PC) |
 |---|---|
-| 자동 시험 | 77개 통과·1개 건너뜀 (`test_manager` 64: 동시 호출·주인 없는 Sandbox 회수·Runner 재시작·Sandbox 재설정·사용자 파일 넣기 포함, `test_isolation` 13. 링크 거부 시험은 symlink 권한이 없는 PC에서 건너뜀) |
+| **받는 폴더로 받아 Sandbox에서 실행** (JH PC 2026-10-08, host_control develop `7aa6f84` + Runner `0c25213`, Host 무수정, Codex `0.162.0-alpha.2`) | **PASS** — Codex에 "ZoomIt.zip 받아서 실행해줘" → `inbox_download`로 받기·압축 풀기 → Sandbox 안 `OK`, SHA-256 원본과 같음 → Sandbox 안에서 실행, **ZoomIt 라이선스 창까지 확인**(기능은 안 봄). Codex의 Host 명령 0번, Host에 ZoomIt 실행 흔적 없음. 받는 폴더 파일은 Host에서 실행 거부(Access is denied), Sandbox는 복사 후 실행 가능, Sandbox는 그 폴더에 못 씀. reset 뒤 다시 연결은 자동 시험으로만 확인 |
+| 자동 시험 (2026-10-08) | 90개 통과·1개 건너뜀 (받는 폴더 8개, 지킴이 실제 PowerShell 1개 포함) |
+| 자동 시험 (이전) | 77개 통과·1개 건너뜀 (`test_manager` 64: 동시 호출·주인 없는 Sandbox 회수·Runner 재시작·Sandbox 재설정·사용자 파일 넣기 포함, `test_isolation` 13. 링크 거부 시험은 symlink 권한이 없는 PC에서 건너뜀) |
 | **사용자 파일 넣기** (JH PC 2026-10-04, `tools/input_files_probe.py`) | **PASS** — 복사본 2개가 Sandbox `C:\UserFiles`에 보이고 SHA-256 일치, 만들기·고치기·지우기 모두 실패, 정리 후 `input` 삭제 |
 | **Runner 재시작·Sandbox 재설정** (JH PC 2026-10-02, `tools/recovery_e2e.py`, Runner develop `452e1b5`) | **PASS** — host_control feat/19(11칸) 44.8초, PR #25 `0690845`(12칸, `--advertise-address`) 46.6초. 재시작 후 READY까지 약 2초(같은 Sandbox), 재설정 후 새 Sandbox에서 데모 완료, 끝난 뒤 Sandbox 0 |
 | **Host 강제 종료 후 회수** (JH PC, READY 직후 `taskkill /F /T` → 다음 `e2e_host.py`) | **PASS.** Sandbox가 남은 것을 확인 → 다음 `start()`가 `ORPHAN_RECLAIMED` → 종료 확인 1.67초·정리 → 새 세션 PASS, 끝난 뒤 Sandbox 0 |
@@ -149,7 +183,7 @@ python tools/smoke_real.py <sandbox_runner.exe>
 
 ## 지켜야 할 규칙 (코드가 막는 것)
 
-- 매핑은 이 세션 작업 폴더 안의 두 폴더만, 항상 읽기 전용. 쓰기 가능 매핑을 만드는 옵션이 없다
+- 매핑은 이 세션 작업 폴더 안의 폴더만, 항상 읽기 전용. 쓰기 가능 매핑을 만드는 옵션이 없다. 예외는 `inbox=`로 지정한 받는 폴더 하나(역시 읽기 전용, 사용자 폴더·OneDrive 거부, 링크는 계속 지움)
 - 작업 폴더가 OneDrive 안이면 거부 (살아 있는 token이 동기화되지 않게)
 - Host 인증서에 개인 키가 섞여 오면 거부
 - LogonCommand는 고정 문자열. 주소는 파일로 전달하고 Host·Guest 양쪽에서 IPv4인지 검사
@@ -168,3 +202,5 @@ python tools/smoke_real.py <sandbox_runner.exe>
 - 방화벽 규칙을 설치 과정·재부팅 후 자동으로 다시 묶는 방법 (관리자 권한, 미결 14·20)
 - Host 쪽 복구 연결(이준원): 언제 `restart_runner()`/`reset_sandbox()`를 부를지, 새 generation 세션 받아 주기, 진행 중 Action UNKNOWN 처리, Agent 알림
 - 네트워크 격리(미결 16): Guest outbound 차단 등
+- 받는 폴더 Host 연결(이준원, 제안서 2026-10-08): `--inbox`, `prepare(inbox=)`·InboxWatcher, `inbox_download` 도구를 Broker 정책·감사 안으로. 승인 여부·내려받기 주소 범위는 같이 정함
+- Codex 창을 갑자기 닫으면 Sandbox가 남음(다음 `start()`가 회수). 바로 정리하는 감시 프로세스는 아직

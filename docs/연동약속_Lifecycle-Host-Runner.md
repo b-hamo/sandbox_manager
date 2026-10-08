@@ -69,6 +69,25 @@ Agent: task_submit (+ 넣을 파일 경로)
 - 기록에는 이름·크기·SHA-256만 남고 원래 경로는 남지 않음
 - **Host가 할 일**: `task_submit`에 파일 칸 추가, 넣어도 되는지 판단, `prepare(..., input_files=...)`로 넘기기, Agent에게 Sandbox 안 경로 알려 주기
 
+### 2-4. 받는 폴더(inbox) (2026-10-08 Lifecycle 추가, Host 연결은 이준원)
+
+```
+Host 시작: inbox = check_inbox_root(--inbox 폴더)        # 사용자 폴더·OneDrive 등이면 INVALID_ARGUMENT
+task_submit:
+  Host  → s = sm.prepare(session_id, runtime_id, generation, runner_exe, inbox=inbox)
+  Host  : InboxWatcher(sm, s).start()                     # 1초마다 sm.scan_inbox(s)
+  ... 2절과 같음 (start → publish_bootstrap → READY → mark_ready)
+Agent: inbox_download(url)  (Host 도구) → 받는 폴더에 파일
+  Lifecycle: 다 받아진 파일만 목록에 + SHA-256, 링크는 지움 → Guest 지킴이가 Desktop\Input에 복사·비교 → input-check.html
+Agent: 기존 GUI 도구로 Sandbox 안에서 실행
+종료: watcher.stop() → sm.stop() → sm.cleanup()          # 받는 폴더는 지우지 않음
+```
+
+- 받는 폴더는 Sandbox `C:\Inbox`에 **읽기 전용**, 사본이 아니라 폴더 자체(배주한 결정, 승인 없음). SCRP 메시지 변화 없음, ARTIFACT(반출)와 별개
+- **Host가 할 일:** `--inbox` 옵션, `prepare(inbox=)`와 InboxWatcher 시작·종료, `inbox_download` 도구(스키마·Broker 정책·감사), 안내문 한 줄, `INBOX_LINK_REMOVED`/`INBOX_HARDLINK_REMOVED`를 보안 이벤트로. 자세한 건 제안서(2026-10-08)
+- **같이 정할 것:** `inbox_download` 승인 여부(10/06 "파일 넣을 땐 승인" 의견과 다름), 내려받기 소속(Host 제안), 주소 허용 범위
+- 시연용 연결: `tools/host_with_inputs.py --inbox`(host_control 무수정)
+
 ### 2-2. Host가 살아 있을 때 복구 (2026-10-02 Lifecycle 추가, Host 연결은 이준원)
 
 ```
@@ -95,7 +114,7 @@ READY까지 약 18초, **재부팅 직후 첫 Sandbox는 1분 이상**(네트워
 | 일 | 담당 |
 |---|---|
 | 세션 등록, token, bootstrap 내용, 인증서·개인 키, Startup Verification, READY, Heartbeat, TERMINATE | Host (이준원) |
-| 작업 폴더, Runner 패키지, .wsb(읽기 전용 매핑 2개), `wsb start`·창 열기, 켠 뒤 주소 확인, 방화벽 규칙 검사, 인증서·주소·준비 표시 전달, Guest 인증서 자동 신뢰, token 파일 삭제, 종료 확인, 정리, 주인 없는 Sandbox 회수, Runner 재시작·Sandbox 재설정 실행 | Lifecycle (배주한) |
+| 작업 폴더, Runner 패키지, .wsb(읽기 전용 매핑 2개 + 선택: 사용자 파일 사본·받는 폴더), 받는 폴더 감시·링크 삭제, Guest 파일 지킴이(복사·SHA-256 비교), `wsb start`·창 열기, 켠 뒤 주소 확인, 방화벽 규칙 검사, 인증서·주소·준비 표시 전달, Guest 인증서 자동 신뢰, token 파일 삭제, 종료 확인, 정리, 주인 없는 Sandbox 회수, Runner 재시작·Sandbox 재설정 실행 | Lifecycle (배주한) |
 | HELLO, GUI 캡처·입력, 스크린샷 업로드, Output 감시 | Runner |
 | 방화벽 규칙 설치·재부팅 후 재적용 (관리자 권한) | 설치 과정 (미정, 아래 5절) |
 
