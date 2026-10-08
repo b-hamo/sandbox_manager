@@ -85,6 +85,35 @@ class InputGate:
         return self._manager.prepare(session_id, runtime_id, generation, runner_exe, **kwargs)
 
 
+def _add_download_tool(mcp_server, inbox: Path) -> None:
+    """One more MCP tool, inbox_download (tools/inbox_download.py), answered here, outside the Broker."""
+    import json
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from inbox_download import TOOL, DownloadError, download_into_inbox
+
+    load = mcp_server.load_tool_list
+    mcp_server.load_tool_list = lambda *a, **k: load(*a, **k) + [TOOL]
+    call = mcp_server.HostBackend.call
+
+    def patched(self, tool: str, arguments: dict) -> dict:
+        if tool != TOOL["name"]:
+            return call(self, tool, arguments)
+        url, extract = arguments.get("url"), bool(arguments.get("extract", False))
+        extra = set(arguments) - {"url", "extract"}
+        try:
+            if not isinstance(url, str) or extra:
+                raise DownloadError("INVALID_ARGUMENT", "arguments: url (string), extract (boolean) only")
+            body = {"ok": True, **download_into_inbox(url, inbox, extract)}
+            log.info("DOWNLOAD %s -> %s", url, ", ".join(f"{f['name']} sha256={f['sha256']}" for f in body["files"]))
+            return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}], "isError": False}
+        except DownloadError as e:
+            log.warning("DOWNLOAD %s refused: %s %s", url, e.code, e.message)
+            body = {"ok": False, "error": e.code, "message": e.message, "retryable": False}
+            return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}], "isError": True}
+
+    mcp_server.HostBackend.call = patched
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     rest = argv[argv.index("--") + 1:] if "--" in argv else []
@@ -109,6 +138,8 @@ def main(argv: list[str] | None = None) -> None:
     real = mcp_server._real_sandbox_manager
     inbox = check_inbox_root(a.inbox) if a.inbox is not None else None   # refuse a bad folder before Codex starts
     mcp_server._real_sandbox_manager = lambda root: InputGate(real(root), files, DialogApprover()._ask, inbox)
+    if inbox is not None:
+        _add_download_tool(mcp_server, inbox)
     mcp_server.main(rest)                          # logging starts here; the approval line names each file
 
 

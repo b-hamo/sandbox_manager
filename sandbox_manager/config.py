@@ -55,11 +55,17 @@ function Add-Check([string]$line) {
     Out-File $checkHtml -Encoding utf8
 }
 New-Item -ItemType Directory -Force $dest | Out-Null
+# Exists from the start, so the Agent can open it before the first file arrives and refresh it (F5).
+if (-not (Test-Path $checkHtml)) {
+  "<!doctype html><meta charset='utf-8'><title>input-check</title><pre style='font:20px Consolas,monospace'>" +
+    "(no file yet - refresh with F5)</pre>" | Out-File $checkHtml -Encoding utf8
+}
 $done = @{}
 $tries = @{}
 while ($true) {
   $entries = @()
-  try { $entries = @(Get-Content $manifest -Raw -ErrorAction Stop | ConvertFrom-Json) } catch { }
+  # PowerShell 5.1 ConvertFrom-Json returns a JSON array as ONE object; piping it on unrolls it into entries.
+  try { $parsed = Get-Content $manifest -Raw -ErrorAction Stop | ConvertFrom-Json; $entries = @($parsed | ForEach-Object { $_ }) } catch { }
   foreach ($f in $entries) {
     $name = [string]$f.name
     $key = "$name|$($f.sha256)"
