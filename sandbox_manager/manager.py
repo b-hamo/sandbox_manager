@@ -39,7 +39,6 @@ synced (OneDrive); the Guest sees only the two read-only folders.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import json
 import os
 import re
@@ -56,6 +55,8 @@ from . import config
 from .errors import (INVALID_ARGUMENT, RUNTIME_START_FAILED, RUNTIME_UNAVAILABLE,
                                     SandboxManagerError)
 from .firewall import FIX_COMMAND, FirewallCheck
+from .inbox import InboxScanner, _within, check_inbox_root
+from .inputs import InputFile, check_file, sha256_of
 from .network import HostNetwork
 from .process import process_started
 from .wsb import WsbCli
@@ -98,12 +99,7 @@ def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+_sha256 = sha256_of
 
 
 @dataclass
@@ -121,9 +117,14 @@ class SandboxSession:
     termination_reason: str | None = None
     owner: dict | None = None                    # {"pid", "started"} of the Host process that prepared it
     restarts: int = 0                            # restart_runner() + reset_sandbox() calls so far
-    # Copies of user files the task needs: [{"name", "size", "sha256"}]. The source path is not kept:
-    # it can be sensitive, and the Guest only ever sees the copy.
+    # Copies of user files the task needs: [{"name", "size", "sha256"}, plus "source" and "registered_at"
+    # for a registered file (inputs.register_input)]. The Host path is not kept: it can be sensitive,
+    # and the Guest only ever sees the copy.
     input_files: list = field(default_factory=list)
+    # The shared inbox folder (prepare(inbox=...)), mapped read-only at config.GUEST_INBOX; its finished
+    # files, as listed by scan_inbox(): [{"name", "size", "sha256", "from": "inbox", "registered_at"}].
+    inbox: str | None = None
+    inbox_files: list = field(default_factory=list)
     timings: dict = field(default_factory=dict)
     events: list = field(default_factory=list)
 
@@ -156,6 +157,10 @@ class SandboxSession:
     def guest_input_paths(self) -> list[str]:
         """Where the Guest sees each input file (read-only), to tell the Agent."""
         return [f"{config.GUEST_INPUT}\\{f['name']}" for f in self.input_files]
+
+    @property
+    def inputs_enabled(self) -> bool:
+        return bool(self.input_files) or self.inbox is not None
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -190,6 +195,7 @@ class SandboxManager:
         self._t0: dict[str, float] = {}
         self._locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
+        self._inbox_scanners: dict[str, InboxScanner] = {}
 
     def _lock_for(self, session_id: str) -> threading.RLock:
         with self._locks_guard:
@@ -284,13 +290,19 @@ class SandboxManager:
 
     # ------------------------------------------------------------------ lifecycle
     def prepare(self, session_id: str, runtime_id: str, generation: int, runner_exe: Path, *,
-                input_files: list | None = None) -> SandboxSession:
+                input_files: list | None = None, inbox: Path | str | None = None) -> SandboxSession:
         """Create the session workspace with the Runner package. Starts nothing.
 
-        input_files: user files the task needs. Each is COPIED into the workspace and shown to the
-        Guest read-only under config.GUEST_INPUT (s.guest_input_paths); the original is never mapped.
-        Whether a file may be handed over at all is the Host's policy decision; this only refuses
-        what cannot be copied safely.
+        inbox: a fixed Host folder the Agent downloads into, mapped read-only and live at
+        config.GUEST_INBOX (see inbox.py; the Host runs an inbox.InboxWatcher for the session).
+
+        input_files: user files the task needs, each an inputs.InputFile (register_input: size and
+        SHA-256 recorded when the Host approved it) or a plain path (hashed now). Each is COPIED into
+        the workspace and shown to the Guest read-only under config.GUEST_INPUT (s.guest_input_paths);
+        the original is never mapped. A registered file whose copy is not the registered bytes is
+        refused. The Guest start script copies them on to the Guest desktop and checks size and
+        SHA-256 again (config.START_PS1). Whether a file may be handed over at all is the Host's
+        policy decision; this only refuses what cannot be copied safely.
         """
         for value, what in ((session_id, "session_id"), (runtime_id, "runtime_id")):
             if not isinstance(value, str) or not ID_RE.match(value):
@@ -301,41 +313,36 @@ class SandboxManager:
         if not runner_exe.is_file():
             raise SandboxManagerError(INVALID_ARGUMENT, f"Runner exe not found: {runner_exe}")
         sources = self._check_inputs(input_files or [])
+        inbox_root = check_inbox_root(inbox) if inbox is not None else None
+        if inbox_root is not None and (_within(self.root, inbox_root) or _within(inbox_root, self.root)):
+            raise SandboxManagerError(INVALID_ARGUMENT, f"inbox must be separate from the workspace: {inbox_root}")
 
         with self._lock_for(session_id):
-            return self._prepare_locked(session_id, runtime_id, generation, runner_exe, sources)
+            return self._prepare_locked(session_id, runtime_id, generation, runner_exe, sources, inbox_root)
 
     @staticmethod
-    def _check_inputs(files: list) -> list[Path]:
+    def _check_inputs(files: list) -> list[tuple[Path, InputFile | None]]:
         sources, names, total = [], set(), 0
         for f in files:
-            p = Path(f)
-            try:
-                st = os.lstat(p)
-            except OSError:
-                raise SandboxManagerError(INVALID_ARGUMENT, f"input file not found: {p}") from None
-            if p.is_symlink() or getattr(st, "st_file_attributes", 0) & config.FILE_ATTRIBUTE_REPARSE_POINT:
-                raise SandboxManagerError(INVALID_ARGUMENT, f"input file is a link: {p}")
-            if not p.is_file():
-                raise SandboxManagerError(INVALID_ARGUMENT, f"input must be a regular file, not a folder: {p}")
+            registered = f if isinstance(f, InputFile) else None
+            p = Path(registered.path if registered else f)
+            st = check_file(p)
             if p.name.lower() in names:                     # Windows names are case-insensitive
                 raise SandboxManagerError(INVALID_ARGUMENT, f"two input files are both named {p.name!r}")
-            if st.st_size > config.INPUT_FILE_MAX:
-                raise SandboxManagerError(INVALID_ARGUMENT,
-                                          f"input file {p.name!r} is {st.st_size} bytes (limit {config.INPUT_FILE_MAX})")
             total += st.st_size
             if total > config.INPUT_TOTAL_MAX:
                 raise SandboxManagerError(INVALID_ARGUMENT, f"input files exceed {config.INPUT_TOTAL_MAX} bytes in total")
             names.add(p.name.lower())
-            sources.append(p)
+            sources.append((p, registered))
         return sources
 
     def _prepare_locked(self, session_id: str, runtime_id: str, generation: int, runner_exe: Path,
-                        sources: list[Path]) -> SandboxSession:
+                        sources: list[tuple[Path, InputFile | None]], inbox_root: Path | None = None) -> SandboxSession:
         directory = self.root / "sessions" / session_id
         if directory.exists():
             raise SandboxManagerError(INVALID_ARGUMENT, f"session {session_id} already exists")
-        s = SandboxSession(session_id, runtime_id, generation, directory, owner=self._me())
+        s = SandboxSession(session_id, runtime_id, generation, directory, owner=self._me(),
+                           inbox=str(inbox_root) if inbox_root else None)
         s.package_dir.mkdir(parents=True)
         s.bootstrap_dir.mkdir()
         self._t0[session_id] = self.clock()
@@ -352,20 +359,54 @@ class SandboxManager:
                 if isinstance(exc, SandboxManagerError):
                     raise
                 raise SandboxManagerError(INVALID_ARGUMENT, f"could not copy input file: {exc}") from None
-        self._event(s, "PREPARED", runner_sha256=s.runner_sha256)
+        if s.inputs_enabled:
+            (s.package_dir / config.INPUT_WATCH_SCRIPT).write_text(config.INPUT_WATCH_PS1, encoding="utf-8-sig")
+            self._write_manifest(s)
+            if s.inbox:
+                self._inbox_scanners[session_id] = InboxScanner(Path(s.inbox), self.clock)
+        self._event(s, "PREPARED", runner_sha256=s.runner_sha256, inbox=s.inbox)
         return s
 
-    def _copy_inputs(self, s: SandboxSession, sources: list[Path]) -> None:
+    def _write_manifest(self, s: SandboxSession) -> None:
+        """What the Guest watcher checks its desktop copies against. In the package folder (live), not among
+        the user's files. Written in place: the Host cannot rename inside a mapped folder; a half-written file
+        fails to parse in the Guest, which simply reads it again a second later."""
+        manifest = [{k: f[k] for k in ("name", "size", "sha256")} | {"from": f.get("from", "input")}
+                    for f in s.input_files + s.inbox_files]
+        (s.package_dir / config.INPUT_MANIFEST).write_text(json.dumps(manifest), encoding="utf-8")
+
+    @_locked
+    def scan_inbox(self, s: SandboxSession) -> list[tuple[str, dict]]:
+        """One look at the shared inbox (inbox.InboxWatcher calls this every second): delete links, list
+        finished files with their SHA-256, update the manifest the Guest reads. Returns the events."""
+        if not s.inbox or s.state not in LIVE_STATES + (PREPARED,):
+            return []
+        scanner = self._inbox_scanners.setdefault(s.session_id, InboxScanner(Path(s.inbox), self.clock))
+        changed, events = scanner.scan()
+        if changed:
+            s.inbox_files = [{k: v for k, v in e.items() if k != "mtime_ns"} for e in scanner.listed.values()]
+            self._write_manifest(s)
+        for kind, fields in events:
+            self._event(s, kind, **fields)
+        return events
+
+    def _copy_inputs(self, s: SandboxSession, sources: list[tuple[Path, InputFile | None]]) -> None:
         s.input_dir.mkdir()
         total = 0
-        for src in sources:
+        for src, registered in sources:
             dst = s.input_dir / src.name
             shutil.copyfile(src, dst)                         # a new file: no link back to the original
             size = dst.stat().st_size
             total += size
             if size > config.INPUT_FILE_MAX or total > config.INPUT_TOTAL_MAX:   # it grew after the check
                 raise SandboxManagerError(INVALID_ARGUMENT, f"input file {src.name!r} grew past the size limit")
-            s.input_files.append({"name": src.name, "size": size, "sha256": _sha256(dst)})
+            entry = {"name": src.name, "size": size, "sha256": _sha256(dst)}
+            if registered is not None:
+                if (entry["size"], entry["sha256"]) != (registered.size, registered.sha256):
+                    raise SandboxManagerError(INVALID_ARGUMENT,
+                                              f"input file {src.name!r} changed since it was registered")
+                entry.update(source=registered.source, registered_at=registered.registered_at)
+            s.input_files.append(entry)
         config.check_contents(s.input_dir)
         self._event(s, "INPUT_FILES_COPIED", count=len(s.input_files), total_bytes=total,
                     names=[f["name"] for f in s.input_files])
@@ -388,7 +429,8 @@ class SandboxManager:
         mappings = [config.Mapping(s.package_dir, config.GUEST_PACKAGE), config.Mapping(s.bootstrap_dir, config.GUEST_BOOTSTRAP)]
         if s.input_files:
             mappings.append(config.Mapping(s.input_dir, config.GUEST_INPUT))
-        xml = config.build_wsb(mappings, config.logon_command(), workspace=s.dir)
+        inbox = config.Mapping(Path(s.inbox), config.GUEST_INBOX) if s.inbox else None
+        xml = config.build_wsb(mappings, config.logon_command(), workspace=s.dir, inbox=inbox)
         s.wsb_path.write_text(xml, encoding="utf-8")        # no secrets in it; kept until cleanup for audit
         self._state(s, STARTING)
         try:

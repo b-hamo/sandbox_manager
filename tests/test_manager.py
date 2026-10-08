@@ -4,6 +4,7 @@ Run: python -m unittest discover -s tests -v
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -739,6 +740,60 @@ class InputFiles(Base):
         self.assertFalse(s.input_dir.exists())
         self.assertEqual(m.load(s.session_id).input_files[0]["name"], "private-name.txt")
 
+    def test_registered_file_records_source_and_writes_manifest(self):
+        from sandbox_manager import register_input
+        a = self.make("ZoomIt.exe", b"MZ" + b"x" * 98)
+        f = register_input(a, source="https://download.sysinternals.com/files/ZoomIt.zip")
+        self.assertEqual((f.size, len(f.sha256)), (100, 64))
+        s = self.manager().prepare("SES-1", "RT-SBX-001", 1, self.runner, input_files=[f])
+        entry = s.input_files[0]
+        self.assertEqual((entry["sha256"], entry["source"]), (f.sha256, f.source))
+        self.assertEqual(entry["registered_at"], f.registered_at)
+        manifest = json.loads((s.package_dir / config.INPUT_MANIFEST).read_text(encoding="utf-8"))
+        self.assertEqual(manifest, [{"name": "ZoomIt.exe", "size": 100, "sha256": f.sha256, "from": "input"}])
+        self.assertTrue((s.package_dir / config.INPUT_WATCH_SCRIPT).is_file())
+        self.assertNotIn(str(a.parent), json.dumps(manifest))     # the Host path never reaches the Guest
+
+    def test_file_changed_after_registration_is_refused(self):
+        from sandbox_manager import register_input
+        a = self.make("tool.exe", b"approved bytes")
+        f = register_input(a)
+        a.write_bytes(b"swapped bytes!")                          # replaced after the user approved it
+        self.assertCode("INVALID_ARGUMENT", self.manager().prepare, "SES-1", "RT-SBX-001", 1, self.runner,
+                        input_files=[f])
+        self.assertFalse((self.root / "sessions" / "SES-1").exists())   # nothing half-prepared is left
+
+    def test_register_refusals(self):
+        from sandbox_manager import register_input
+        folder = Path(self.tmp.name) / "afolder"
+        folder.mkdir()
+        for bad in (self.make("ZoomIt.zip.crdownload"), self.make("setup.exe.part"), folder,
+                    Path(self.tmp.name) / "missing.exe"):
+            with self.assertRaises(SandboxManagerError) as cm:
+                register_input(bad)
+            self.assertEqual(cm.exception.code, "INVALID_ARGUMENT")
+        with self.assertRaises(SandboxManagerError):
+            register_input(self.make("ok.exe"), source="bad\nsource")
+        with mock.patch.object(config, "INPUT_FILE_MAX", 3):
+            with self.assertRaises(SandboxManagerError):
+                register_input(self.make("big.exe", b"xxxx"))
+
+    def test_no_manifest_without_inputs_and_guest_script_checks_copies(self):
+        m, s = self.started()
+        self.assertFalse((s.package_dir / config.INPUT_MANIFEST).exists())
+        self.assertFalse((s.package_dir / config.INPUT_WATCH_SCRIPT).exists())
+        m.stop(s, "TASK_COMPLETE")
+        start, watch = config.START_PS1, config.INPUT_WATCH_PS1
+        # The watcher is started before the Runner, only when the package has it.
+        self.assertLess(start.index(config.INPUT_WATCH_SCRIPT), start.index("sandbox_runner.exe"))
+        self.assertIn(r"C:\RunnerPackage\inputs.json", watch)
+        self.assertIn("Get-FileHash", watch)
+        self.assertIn("(copy deleted)", watch)
+        self.assertIn(config.GUEST_INBOX, watch)
+        self.assertIn(config.GUEST_INPUT, watch)
+        # It copies and checks; it never runs an input file itself.
+        self.assertNotRegex(watch, r"Start-Process|Invoke-Item|& \$dst|Invoke-Expression")
+
     def test_reset_sandbox_keeps_the_inputs(self):
         a = self.make("a.txt")
         m = self.manager()
@@ -750,6 +805,131 @@ class InputFiles(Base):
         self.assertIn(f"<SandboxFolder>{config.GUEST_INPUT}</SandboxFolder>", self.wsb.started_xml[1])
         self.assertTrue((s.input_dir / "a.txt").is_file())
         m.stop(s, "TASK_COMPLETE")
+
+
+class Inbox(Base):
+    """prepare(inbox=...): a fixed Host folder mapped read-only and live; scan_inbox lists finished files."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = Path(self.tmp.name) / "home"
+        (self.home / "Documents").mkdir(parents=True)
+        self.inbox = self.home / "SecureCUA" / "codex-work" / "inbox"
+        self.inbox.mkdir(parents=True)
+        patcher = mock.patch("sandbox_manager.inbox.Path.home", return_value=self.home)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def prepared(self):
+        m = self.manager()
+        return m, m.prepare("SES-1", "RT-SBX-001", 1, self.runner, inbox=self.inbox)
+
+    def manifest(self, s):
+        return json.loads((s.package_dir / config.INPUT_MANIFEST).read_text(encoding="utf-8"))
+
+    def test_inbox_is_mapped_read_only_and_watcher_installed(self):
+        m, s = self.prepared()
+        self.assertEqual(self.manifest(s), [])
+        self.assertTrue((s.package_dir / config.INPUT_WATCH_SCRIPT).is_file())
+        m.start(s)
+        xml = self.wsb.started_xml[0]
+        self.assertIn(f"<HostFolder>{self.inbox.resolve()}</HostFolder><SandboxFolder>{config.GUEST_INBOX}"
+                      "</SandboxFolder><ReadOnly>true</ReadOnly>", xml)
+        self.assertNotIn("<ReadOnly>false", xml)
+        m.stop(s, "TASK_COMPLETE")
+        m.cleanup(s)
+        self.assertTrue(self.inbox.is_dir())                 # the inbox is the user's: never removed
+
+    def test_only_finished_files_are_listed(self):
+        m, s = self.prepared()
+        m.start(s)
+        (self.inbox / "ZoomIt.zip.crdownload").write_bytes(b"partial")
+        (self.inbox / "ZoomIt.exe").write_bytes(b"MZ" + b"x" * 50)
+        sub = self.inbox / "tools"
+        sub.mkdir()
+        (sub / "a.txt").write_bytes(b"a")
+        m.scan_inbox(s)                                      # first sight: not yet known to be finished
+        self.assertEqual(self.manifest(s), [])
+        self.clock.sleep(3)
+        events = m.scan_inbox(s)
+        names = sorted(e["name"] for e in self.manifest(s))
+        self.assertEqual(names, ["ZoomIt.exe", "tools\\a.txt"])
+        self.assertEqual({e["from"] for e in self.manifest(s)}, {"inbox"})
+        self.assertIn("INBOX_FILE_REGISTERED", [k for k, _ in events])
+        zoom = next(e for e in self.manifest(s) if e["name"] == "ZoomIt.exe")
+        self.assertEqual(zoom["sha256"], hashlib.sha256(b"MZ" + b"x" * 50).hexdigest())
+        self.assertEqual(m.scan_inbox(s), [])                # nothing new
+
+    def test_changed_file_is_listed_again_with_its_new_hash(self):
+        m, s = self.prepared()
+        m.start(s)
+        f = self.inbox / "tool.exe"
+        f.write_bytes(b"first")
+        m.scan_inbox(s); self.clock.sleep(3); m.scan_inbox(s)
+        first = self.manifest(s)[0]["sha256"]
+        f.write_bytes(b"second version")
+        os.utime(f, ns=(1, 1))                               # make sure the time changes too
+        m.scan_inbox(s); self.clock.sleep(3)
+        events = m.scan_inbox(s)
+        self.assertIn("INBOX_FILE_CHANGED", [k for k, _ in events])
+        self.assertNotEqual(self.manifest(s)[0]["sha256"], first)
+
+    def test_too_big_file_is_skipped(self):
+        m, s = self.prepared()
+        m.start(s)
+        (self.inbox / "big.bin").write_bytes(b"x" * 20)
+        with mock.patch.object(config, "INPUT_FILE_MAX", 10):
+            m.scan_inbox(s); self.clock.sleep(3)
+            events = m.scan_inbox(s)
+        self.assertEqual(self.manifest(s), [])
+        self.assertIn("INBOX_FILE_SKIPPED", [k for k, _ in events])
+
+    def test_hard_link_is_removed_but_its_target_kept(self):
+        secret = Path(self.tmp.name) / "secret.txt"
+        secret.write_bytes(b"host secret")
+        m, s = self.prepared()
+        m.start(s)
+        try:
+            os.link(secret, self.inbox / "innocent.txt")
+        except OSError:
+            self.skipTest("hard links not supported here")
+        events = m.scan_inbox(s)
+        self.assertIn("INBOX_HARDLINK_REMOVED", [k for k, _ in events])
+        self.assertFalse((self.inbox / "innocent.txt").exists())
+        self.assertEqual(secret.read_bytes(), b"host secret")
+
+    @unittest.skipUnless(sys.platform == "win32", "junctions")
+    def test_junction_is_removed_but_its_target_kept(self):
+        target = Path(self.tmp.name) / "private"
+        target.mkdir()
+        (target / "keep.txt").write_bytes(b"keep")
+        m, s = self.prepared()
+        m.start(s)
+        import subprocess
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(self.inbox / "j"), str(target)], check=True,
+                       capture_output=True)
+        events = m.scan_inbox(s)
+        self.assertIn("INBOX_LINK_REMOVED", [k for k, _ in events])
+        self.assertFalse(os.path.lexists(self.inbox / "j"))
+        self.assertTrue((target / "keep.txt").is_file())
+
+    @unittest.skipUnless(sys.platform == "win32", "junctions")
+    def test_start_refuses_a_link_already_in_the_inbox(self):
+        target = Path(self.tmp.name) / "private"
+        target.mkdir()
+        m, s = self.prepared()
+        import subprocess
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(self.inbox / "j"), str(target)], check=True,
+                       capture_output=True)
+        self.assertCode("INVALID_ARGUMENT", m.start, s)
+        self.assertEqual(self.wsb.started_xml, [])
+
+    def test_bad_inbox_roots(self):
+        m = self.manager()
+        for bad in (self.home, self.home / "Documents", Path("relative/inbox"), self.home / "missing",
+                    self.root):
+            self.assertCode("INVALID_ARGUMENT", m.prepare, "SES-1", "RT-SBX-001", 1, self.runner, inbox=bad)
+        self.assertFalse((self.root / "sessions" / "SES-1").exists())
 
 
 class WsbExec(unittest.TestCase):
