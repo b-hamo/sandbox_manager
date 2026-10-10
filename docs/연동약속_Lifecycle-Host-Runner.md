@@ -87,6 +87,7 @@ Agent: 기존 GUI 도구로 Sandbox 안에서 실행
 - **Host가 할 일:** `--inbox` 옵션, `prepare(inbox=)`와 InboxWatcher 시작·종료, `inbox_download` 도구(스키마·Broker 정책·감사), 안내문 한 줄, `INBOX_LINK_REMOVED`/`INBOX_HARDLINK_REMOVED`를 보안 이벤트로. 자세한 건 제안서(2026-10-08)
 - **같이 정할 것:** `inbox_download` 승인 여부(10/06 "파일 넣을 땐 승인" 의견과 다름), 내려받기 소속(Host 제안), 주소 허용 범위
 - 시연용 연결: `tools/host_with_inputs.py --inbox`(host_control 무수정)
+- **이미 받아 둔 파일 (2026-10-10 추가):** `Agent: inbox_import(name)` (Host 도구) → `sandbox_manager.import_to_inbox(name, inbox)`가 다운로드 폴더 바로 안의 그 파일만 검사·복사(원본 유지) → 이후 위와 같음. 이름만 받고 경로는 거부. 지금은 Agent가 부르고, Host가 직접 부르는 방식으로 바꿔도 검사는 같은 함수
 
 ### 2-2. Host가 살아 있을 때 복구 (2026-10-02 Lifecycle 추가, Host 연결은 이준원)
 

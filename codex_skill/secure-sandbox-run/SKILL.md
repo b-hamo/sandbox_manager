@@ -1,11 +1,11 @@
 ---
 name: "secure-sandbox-run"
-description: "Run, open, install or try any file or program from the internet (or any untrusted file) safely: download it with the scrp inbox_download tool and run it only inside the Secure CUA Windows Sandbox through the scrp MCP tools, never on this PC. Use whenever the user asks to download-and-run, open an internet file (exe, zip, pdf, installer, script), test a program, or do anything risky that should not touch this computer. Do not use for ordinary coding or reading local project files."
+description: "Run, open, install or try any file or program from the internet (or any untrusted file) safely: download it with the scrp inbox_download tool (or, for a file the user already downloaded, copy it with inbox_import) and run it only inside the Secure CUA Windows Sandbox through the scrp MCP tools, never on this PC. Use whenever the user asks to download-and-run, run a file they already downloaded (Downloads folder), open an internet file (exe, zip, pdf, installer, script), test a program, or do anything risky that should not touch this computer. Do not use for ordinary coding or reading local project files."
 ---
 
 # Secure Sandbox Run (Secure CUA, S-개발자)
 
-This PC (the Host) is protected. **Nothing is run or installed on this PC. Files come in only through `inbox_download`; programs run only inside the Sandbox.**
+This PC (the Host) is protected. **Nothing is run or installed on this PC. Files come in only through `inbox_download` or `inbox_import`; programs run only inside the Sandbox.**
 Router (the component that will decide this automatically) is not built yet; until then this skill tells you the procedure. The real blocking is done by the Host (tool policy, deny-execute folder, read-only mapping), not by this text.
 
 Reply to the user in Korean, briefly.
@@ -13,13 +13,14 @@ Reply to the user in Korean, briefly.
 ## 1. Get the file
 - Use the `scrp` tool `inbox_download` (https URLs only). For a .zip pass `extract: true` to unpack it.
 - The file lands in the Host inbox `C:\Users\JH\SecureCUA\codex-work\inbox`, which the Sandbox sees read-only as `C:\Inbox`.
+- **The user already downloaded it** ("다운로드한 X 실행해줘", a file in the Downloads folder): use the `scrp` tool `inbox_import` with the **file name only** (e.g. `{"name": "ZoomIt.zip", "extract": true}`), never a path. It copies the file from Downloads into the same inbox; the original stays. If you are not sure of the exact name, list the Downloads folder with a read-only shell command (`Get-ChildItem $HOME\Downloads -Name`) and ask the user when several files match. Files outside Downloads are refused on purpose: do not try another path.
 - Do not download with shell commands (curl, Invoke-WebRequest, ...). Do not run, install, move or copy the downloaded file on this PC.
 
 ## 2. Start the Sandbox and run it there (scrp MCP tools only)
 1. `task_submit` (goal: what the user asked). The Sandbox starts; this may be before or after the download.
 2. Call `computer_observe` with `wait_ms: 10000` until a screenshot comes back. "PREPARING" errors are normal: retry up to 12 times.
 3. Each downloaded file is copied within seconds to the Sandbox desktop folder `Input` and checked. Big files can take 10–30 s.
-4. Before running anything, double-click the desktop icon `input-check.html` (opens in Edge). Confirm the file's line says `OK` and its SHA-256 equals the `inbox_download` result; tell the user the size and SHA-256.
+4. Before running anything, double-click the desktop icon `input-check.html` (opens in Edge). Confirm the file's line says `OK` and its SHA-256 equals the `inbox_download` / `inbox_import` result; tell the user the size and SHA-256.
    - If the line is not there yet, wait 5 s and press F5; repeat up to 12 times (about 1 minute).
    - If it is still missing or says `FAIL`, do not run the file; report it. Never re-download it inside the Sandbox instead.
 5. Open things only by **double-clicking desktop icons** (the `Input` folder opens in Explorer). The Sandbox has no Notepad, so `.txt` files do not open. Win+R (Run dialog) is blocked by policy (`POLICY_DENIED`): do not use it.

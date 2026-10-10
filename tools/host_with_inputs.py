@@ -85,29 +85,34 @@ class InputGate:
         return self._manager.prepare(session_id, runtime_id, generation, runner_exe, **kwargs)
 
 
-def _add_download_tool(mcp_server, inbox: Path) -> None:
-    """One more MCP tool, inbox_download (tools/inbox_download.py), answered here, outside the Broker."""
+def _add_inbox_tools(mcp_server, inbox: Path, import_from: Path | None) -> None:
+    """Two more MCP tools (tools/inbox_download.py), answered here, outside the Broker:
+    inbox_download (https URL -> inbox) and inbox_import (a file already in Downloads -> inbox)."""
     import json
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from inbox_download import TOOL, DownloadError, download_into_inbox
+    from inbox_download import IMPORT_TOOL, TOOL, DownloadError, download_into_inbox, import_into_inbox
 
+    # tool name -> (main argument, what to run)
+    tools = {TOOL["name"]: ("url", lambda arg, extract: download_into_inbox(arg, inbox, extract)),
+             IMPORT_TOOL["name"]: ("name", lambda arg, extract: import_into_inbox(arg, inbox, extract, import_from))}
     load = mcp_server.load_tool_list
-    mcp_server.load_tool_list = lambda *a, **k: load(*a, **k) + [TOOL]
+    mcp_server.load_tool_list = lambda *a, **k: load(*a, **k) + [TOOL, IMPORT_TOOL]
     call = mcp_server.HostBackend.call
 
     def patched(self, tool: str, arguments: dict) -> dict:
-        if tool != TOOL["name"]:
+        if tool not in tools:
             return call(self, tool, arguments)
-        url, extract = arguments.get("url"), bool(arguments.get("extract", False))
-        extra = set(arguments) - {"url", "extract"}
+        key, run = tools[tool]
+        arg, extract = arguments.get(key), arguments.get("extract", False)
+        extra = set(arguments) - {key, "extract"}
         try:
-            if not isinstance(url, str) or extra:
-                raise DownloadError("INVALID_ARGUMENT", "arguments: url (string), extract (boolean) only")
-            body = {"ok": True, **download_into_inbox(url, inbox, extract)}
-            log.info("DOWNLOAD %s -> %s", url, ", ".join(f"{f['name']} sha256={f['sha256']}" for f in body["files"]))
+            if not isinstance(arg, str) or not isinstance(extract, bool) or extra:
+                raise DownloadError("INVALID_ARGUMENT", f"arguments: {key} (string), extract (boolean) only")
+            body = {"ok": True, **run(arg, extract)}
+            log.info("%s %s -> %s", tool.upper(), arg, ", ".join(f"{f['name']} sha256={f['sha256']}" for f in body["files"]))
             return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}], "isError": False}
         except DownloadError as e:
-            log.warning("DOWNLOAD %s refused: %s %s", url, e.code, e.message)
+            log.warning("%s %r refused: %s %s", tool.upper(), arg, e.code, e.message)
             body = {"ok": False, "error": e.code, "message": e.message, "retryable": False}
             return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}], "isError": True}
 
@@ -124,6 +129,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--input-source", action="append", default=[], help="where it came from, same order")
     ap.add_argument("--inbox", type=Path, default=None,
                     help="shared folder the Agent downloads into, mapped read-only (tools/setup_inbox.ps1 first)")
+    ap.add_argument("--import-from", type=Path, default=None,
+                    help="folder inbox_import copies from, by file name only (default: the user's Downloads)")
     a = ap.parse_args(mine)
     if len(a.input_source) > len(a.input):
         ap.error("more --input-source than --input")
@@ -139,7 +146,7 @@ def main(argv: list[str] | None = None) -> None:
     inbox = check_inbox_root(a.inbox) if a.inbox is not None else None   # refuse a bad folder before Codex starts
     mcp_server._real_sandbox_manager = lambda root: InputGate(real(root), files, DialogApprover()._ask, inbox)
     if inbox is not None:
-        _add_download_tool(mcp_server, inbox)
+        _add_inbox_tools(mcp_server, inbox, a.import_from)
     mcp_server.main(rest)                          # logging starts here; the approval line names each file
 
 
