@@ -16,6 +16,10 @@ from sandbox_manager import SandboxManager, SandboxManagerError
 ```
 호출 시점·순서는 `docs/연동약속_Lifecycle-Host-Runner.md` 2절(Sandbox는 `task_submit` 때 켠다).
 
+### Sandbox 안에서 Win+R 사용
+
+Sandbox Manager의 `.wsb`와 Guest 시작 스크립트는 Win+R을 비활성화하지 않는다. 기존 `POLICY_DENIED`는 `host_control/host/policy.py`의 입력 정책에서 발생했다. Win+R을 허용하는 Host 정책 `POL-0.1.1` 이상으로 업데이트하고 새 세션을 시작하면, READY 뒤 `computer_observe`를 거쳐 `computer_hotkey(keys=["win", "r"])`로 Sandbox 안 실행 창을 열 수 있다. Sandbox Manager만 업데이트하면 기존 Host의 차단은 해제되지 않는다. 아래 2026-09-29 시험 표의 Win+R 거부는 변경 전 정책의 기록이다.
+
 ## 하는 일 / 안 하는 일
 
 | 한다 | 안 한다 (다른 담당) |
