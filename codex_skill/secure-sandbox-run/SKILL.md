@@ -22,7 +22,7 @@ Reply to the user in Korean, briefly.
 4. Before running anything, double-click the desktop icon `input-check.html` (opens in Edge). Confirm the file's line says `OK` and its SHA-256 equals the `inbox_download` result; tell the user the size and SHA-256.
    - If the line is not there yet, wait 5 s and press F5; repeat up to 12 times (about 1 minute).
    - If it is still missing or says `FAIL`, do not run the file; report it. Never re-download it inside the Sandbox instead.
-5. Open things only by **double-clicking desktop icons** (the `Input` folder opens in Explorer). The Sandbox has no Notepad, so `.txt` files do not open. Win+R (Run dialog) is blocked by policy (`POLICY_DENIED`): do not use it.
+5. Open things by **double-clicking desktop icons** (the `Input` folder opens in Explorer) or use `computer_hotkey` with `keys: ["win", "r"]` to open the Run dialog inside the Sandbox. This requires host_control policy `POL-0.1.1` or later; after updating the Host, start a new session. The Sandbox has no Notepad, so `.txt` files do not open. If an older Host returns `POLICY_DENIED`, report that the Host needs updating; do not work around the denial.
 6. Run the program by double-clicking it in the `Input` folder (GUI actions through scrp only).
 7. Say it ran only after `computer_observe` shows its window. If only a license window appeared, say exactly "라이선스 창까지 확인" and do not accept the license unless the user asks.
 
