@@ -16,23 +16,23 @@ Nothing downloaded is ever run on the Host.
 """
 from __future__ import annotations
 
-import hashlib
 import ipaddress
-import re
 import shutil
 import socket
 import ssl
 import tempfile
 import urllib.parse
 import urllib.request
-import zipfile
 from pathlib import Path, PureWindowsPath
 
-from sandbox_manager import config
+from sandbox_manager import SandboxManagerError, config
+from sandbox_manager.importer import extract_zip, import_to_inbox, safe_name, sha256_file as _sha256
+from sandbox_manager.importer import unique_path as _unique
 
 MAX_REDIRECTS = 5
 TIMEOUT_S = 60
-ZIP_MAX_FILES = 200
+NEXT_STEP = ("task_submit (if not yet), wait for the Sandbox, open Desktop\\input-check.html, "
+             "check the line is OK, then run the file from Desktop\\Input inside the Sandbox")
 
 TOOL = {
     "name": "inbox_download",
@@ -81,28 +81,6 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None                                   # handled by hand so every hop is checked
 
 
-def safe_name(name: str, fallback: str = "download.bin") -> str:
-    name = re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("._") or fallback
-    return name[:100]
-
-
-def _unique(folder: Path, name: str) -> Path:
-    p = folder / name
-    stem, suffix, n = p.stem, p.suffix, 1
-    while p.exists():
-        n += 1
-        p = folder / f"{stem}-{n}{suffix}"
-    return p
-
-
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def fetch(url: str, staging: Path) -> tuple[Path, str]:
     """Download to `staging`; returns (file, final URL)."""
     opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
@@ -138,28 +116,6 @@ def fetch(url: str, staging: Path) -> tuple[Path, str]:
     raise DownloadError("INVALID_ARGUMENT", f"more than {MAX_REDIRECTS} redirects")
 
 
-def _extract(archive: Path, dest: Path) -> list[Path]:
-    out = []
-    with zipfile.ZipFile(archive) as z:
-        members = [m for m in z.infolist() if not m.is_dir()]
-        if len(members) > ZIP_MAX_FILES:
-            raise DownloadError("INVALID_ARGUMENT", f"zip has more than {ZIP_MAX_FILES} files")
-        if sum(m.file_size for m in members) > config.INPUT_TOTAL_MAX:
-            raise DownloadError("INVALID_ARGUMENT", "zip contents are too large")
-        for m in members:
-            parts = PureWindowsPath(m.filename.replace("/", "\\")).parts
-            if not parts or PureWindowsPath(m.filename).is_absolute() or any(p in ("..", "") or ":" in p for p in parts):
-                raise DownloadError("POLICY_DENIED", f"unsafe path in zip: {m.filename!r}")
-            if (m.external_attr >> 16) & 0o170000 == 0o120000:
-                raise DownloadError("POLICY_DENIED", f"link in zip: {m.filename!r}")
-            target = dest.joinpath(*[safe_name(p) for p in parts])
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with z.open(m) as src, target.open("wb") as dst:
-                shutil.copyfileobj(src, dst)
-            out.append(target)
-    return out
-
-
 def download_into_inbox(url: str, inbox: Path, extract: bool = False) -> dict:
     inbox = Path(inbox)
     with tempfile.TemporaryDirectory(prefix="securecua-dl-") as tmp:
@@ -170,7 +126,10 @@ def download_into_inbox(url: str, inbox: Path, extract: bool = False) -> dict:
             if got.suffix.lower() != ".zip":
                 raise DownloadError("INVALID_ARGUMENT", "extract=true needs a .zip file")
             unpack = staging / "unpacked"
-            files = _extract(got, unpack)
+            try:
+                files = extract_zip(got, unpack)
+            except SandboxManagerError as e:
+                raise DownloadError(e.code, e.message) from None
         # Copy into the inbox (new files only; the watcher lists each once it is complete).
         if extract:
             root = _unique(inbox, got.stem)
@@ -187,5 +146,34 @@ def download_into_inbox(url: str, inbox: Path, extract: bool = False) -> dict:
         result = [{"name": str(p.relative_to(inbox)), "size": p.stat().st_size, "sha256": _sha256(p)} for p in placed]
     return {"source": url, "final_url": final_url, "files": result,
             "sandbox_paths": [f"Desktop\\Input\\{r['name']}" for r in result],
-            "next": "task_submit (if not yet), wait for the Sandbox, open Desktop\\input-check.html, "
-                    "check the line is OK, then run the file from Desktop\\Input inside the Sandbox"}
+            "next": NEXT_STEP}
+
+
+IMPORT_TOOL = {
+    "name": "inbox_import",
+    "description": ("Copy one file the user already downloaded (a file directly in this computer's Downloads "
+                    "folder, given by its file name only, e.g. \"ZoomIt.zip\") into the shared inbox. The original "
+                    "stays where it is. Like inbox_download, the inbox is visible read-only inside the Sandbox as "
+                    "C:\\Inbox and each file is copied to the Sandbox desktop folder Input and checked "
+                    "(Desktop\\input-check.html). Nothing is run on this computer. With extract=true a .zip is "
+                    "unpacked into a folder of the same name. Paths, subfolders, links and files over 50 MiB are refused."),
+    "inputSchema": {
+        "type": "object", "additionalProperties": False, "required": ["name"],
+        "properties": {
+            "name": {"type": "string", "minLength": 1, "maxLength": 255,
+                     "description": "file name in the Downloads folder, no folder part"},
+            "extract": {"type": "boolean", "default": False, "description": "unpack a .zip after copying"},
+        },
+    },
+    "annotations": {"title": "Copy a downloaded file into the Sandbox inbox", "readOnlyHint": False,
+                    "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+}
+
+
+def import_into_inbox(name: str, inbox: Path, extract: bool = False, source_dir: Path | None = None) -> dict:
+    """The MCP tool: sandbox_manager.import_to_inbox does every check; this only shapes the answer."""
+    try:
+        body = import_to_inbox(name, inbox, source_dir, extract)
+    except SandboxManagerError as e:
+        raise DownloadError(e.code, e.message) from None
+    return {**body, "next": NEXT_STEP}
