@@ -18,7 +18,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tools"))
 
-from sandbox_manager import SandboxManagerError, config, import_to_inbox  # noqa: E402
+from sandbox_manager import SandboxManagerError, clear_inbox, config, finish_inbox, import_to_inbox  # noqa: E402
 from sandbox_manager import importer  # noqa: E402
 
 
@@ -160,6 +160,112 @@ class ImportToInbox(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "Known Folder")
     def test_default_source_is_the_real_downloads_folder(self):
         self.assertTrue(importer.downloads_folder().is_dir())
+
+
+class FinishInbox(unittest.TestCase):
+    """Session end: default delete; kept items are copied to Downloads, marked as from the internet."""
+
+    setUp, put = ImportToInbox.setUp, ImportToInbox.put
+
+    def fill(self):
+        (self.inbox / "tool.exe").write_bytes(b"MZtool")
+        z = self.inbox / "ZoomIt"
+        (z / "docs").mkdir(parents=True)
+        (z / "ZoomIt64.exe").write_bytes(b"MZ64")
+        (z / "docs" / "Eula.txt").write_bytes(b"eula")
+
+    def zone(self, p: Path) -> str:
+        try:
+            with open(f"{p}:Zone.Identifier", encoding="ascii", newline="") as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    def test_default_deletes_everything_and_keeps_the_folder(self):
+        self.fill()
+        r = finish_inbox(self.inbox)
+        self.assertEqual(r, {"kept": [], "deleted_files": 3})
+        self.assertTrue(self.inbox.is_dir())
+        self.assertEqual(list(self.inbox.iterdir()), [])
+        self.assertEqual(list(self.downloads.iterdir()), [])
+        self.fill()
+        self.assertEqual(clear_inbox(self.inbox), 3)
+
+    def test_kept_file_goes_to_downloads_marked_and_the_rest_is_deleted(self):
+        self.fill()
+        r = finish_inbox(self.inbox, ["tool.exe"], self.downloads)
+        self.assertEqual((self.downloads / "tool.exe").read_bytes(), b"MZtool")
+        self.assertEqual(r["kept"][0]["to"], str(self.downloads / "tool.exe"))
+        self.assertEqual(list(self.inbox.iterdir()), [])
+        if sys.platform == "win32":
+            self.assertEqual(self.zone(self.downloads / "tool.exe"), "[ZoneTransfer]\r\nZoneId=3\r\n")
+
+    def test_kept_folder_is_copied_whole(self):
+        self.fill()
+        finish_inbox(self.inbox, ["ZoomIt"], self.downloads)
+        self.assertEqual((self.downloads / "ZoomIt" / "ZoomIt64.exe").read_bytes(), b"MZ64")
+        self.assertEqual((self.downloads / "ZoomIt" / "docs" / "Eula.txt").read_bytes(), b"eula")
+        if sys.platform == "win32":
+            self.assertIn("ZoneId=3", self.zone(self.downloads / "ZoomIt" / "ZoomIt64.exe"))
+
+    def test_keep_by_reported_name_inside_a_folder(self):
+        self.fill()
+        finish_inbox(self.inbox, ["ZoomIt\\ZoomIt64.exe"], self.downloads)
+        self.assertEqual((self.downloads / "ZoomIt64.exe").read_bytes(), b"MZ64")
+
+    def test_never_overwrites_and_skips_what_is_already_there(self):
+        self.put("tool.exe", b"other")                          # a different file with the same name
+        self.put("same.exe", b"MZsame")                         # the original of an inbox_import copy
+        (self.inbox / "tool.exe").write_bytes(b"MZtool")
+        (self.inbox / "same.exe").write_bytes(b"MZsame")
+        r = finish_inbox(self.inbox, ["tool.exe", "same.exe"], self.downloads)
+        self.assertEqual((self.downloads / "tool.exe").read_bytes(), b"other")
+        self.assertEqual((self.downloads / "tool-2.exe").read_bytes(), b"MZtool")
+        self.assertEqual([k["already_there"] for k in r["kept"]], [False, True])
+        self.assertEqual(sorted(p.name for p in self.downloads.iterdir()), ["same.exe", "tool-2.exe", "tool.exe"])
+
+    def test_bad_keep_name_deletes_nothing(self):
+        self.fill()
+        (self.home / "Documents").mkdir()
+        (self.home / "Documents" / "secret.docx").write_bytes(b"private")
+        for bad, code in (("..\\Documents\\secret.docx", "POLICY_DENIED"),
+                          (str(self.home / "Documents" / "secret.docx"), "POLICY_DENIED"),
+                          ("missing.exe", "INVALID_ARGUMENT"), ("", "INVALID_ARGUMENT")):
+            with self.assertRaises(SandboxManagerError) as cm:
+                finish_inbox(self.inbox, ["tool.exe", bad], self.downloads)
+            self.assertEqual(cm.exception.code, code, bad)
+        self.assertTrue((self.inbox / "tool.exe").is_file())    # nothing deleted
+        self.assertEqual(list(self.downloads.iterdir()), [])     # nothing kept
+
+    @unittest.skipUnless(sys.platform == "win32", "junctions")
+    def test_links_are_removed_not_followed_nor_kept(self):
+        target = self.home / "private"
+        target.mkdir()
+        (target / "keep.txt").write_bytes(b"keep")
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(self.inbox / "j"), str(target)], check=True,
+                       capture_output=True)
+        with self.assertRaises(SandboxManagerError):
+            finish_inbox(self.inbox, ["j\\keep.txt"], self.downloads)
+        finish_inbox(self.inbox)
+        self.assertFalse(os.path.lexists(self.inbox / "j"))
+        self.assertEqual((target / "keep.txt").read_bytes(), b"keep")
+
+
+class HostWrapperCleanup(unittest.TestCase):
+    """tools/host_with_inputs.py: when the Host ends a session (cleanup), the inbox is emptied by default."""
+
+    setUp = ImportToInbox.setUp
+
+    def test_cleanup_empties_the_inbox(self):
+        from host_with_inputs import InputGate
+        manager = mock.Mock()
+        manager.cleanup.return_value = {"removed": True}
+        gate = InputGate(manager, [], ask=None, inbox=self.inbox)
+        (self.inbox / "left.exe").write_bytes(b"MZ")
+        session = mock.Mock(session_id="SES-1")
+        self.assertEqual(gate.cleanup(session), {"removed": True})
+        manager.cleanup.assert_called_once_with(session)
+        self.assertEqual(list(self.inbox.iterdir()), [])
 
 
 class ImportTool(unittest.TestCase):

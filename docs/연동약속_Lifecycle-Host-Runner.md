@@ -88,6 +88,7 @@ Agent: 기존 GUI 도구로 Sandbox 안에서 실행
 - **같이 정할 것:** `inbox_download` 승인 여부(10/06 "파일 넣을 땐 승인" 의견과 다름), 내려받기 소속(Host 제안), 주소 허용 범위
 - 시연용 연결: `tools/host_with_inputs.py --inbox`(host_control 무수정)
 - **이미 받아 둔 파일 (2026-10-10 추가):** `Agent: inbox_import(name)` (Host 도구) → `sandbox_manager.import_to_inbox(name, inbox)`가 다운로드 폴더 바로 안의 그 파일만 검사·복사(원본 유지) → 이후 위와 같음. 이름만 받고 경로는 거부. 지금은 Agent가 부르고, Host가 직접 부르는 방식으로 바꿔도 검사는 같은 함수
+- **세션 끝 유지/삭제 (2026-10-11 추가):** 기본은 삭제. Host가 세션을 끝낼 때(`stop → cleanup` 뒤) `clear_inbox(inbox)`, 사용자가 남길 것을 고르면 그 전에 `finish_inbox(inbox, keep=[이름])`(다운로드 폴더로 복사·인터넷 표시·나머지 삭제). Host가 갑자기 죽었으면 다음 Host 시작 때 `clear_inbox`. 시연용은 `host_with_inputs.py`가 이미 함(Agent 도구 `inbox_finish`)
 
 ### 2-2. Host가 살아 있을 때 복구 (2026-10-02 Lifecycle 추가, Host 연결은 이준원)
 
