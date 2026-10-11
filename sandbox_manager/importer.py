@@ -16,6 +16,16 @@ What is checked here, whoever calls it:
 - the bytes copied are the bytes hashed: copied once to a private staging folder while hashing, and
   refused if the source changed meanwhile; only then placed in the inbox under a new name
 The original stays where it is (copy, not move). Nothing is ever run on the Host.
+
+At the end of a session (배주한 결정 2026-10-11: default delete, keep = back to Downloads):
+
+    finish_inbox(inbox, keep=["ZoomIt"])    # copy what the user wants to keep to Downloads, empty the inbox
+    clear_inbox(inbox)                      # the default: empty the inbox, nothing kept
+
+A kept file is copied (not moved: a moved file would carry the inbox's deny-execute ACL along) into
+Downloads under a new name, marked as downloaded from the internet (Zone.Identifier, so Windows asks
+before running it on the Host), and only then is the inbox emptied. If anything named cannot be kept,
+nothing is deleted.
 """
 from __future__ import annotations
 
@@ -185,3 +195,108 @@ def import_to_inbox(name: str, inbox, source_dir=None, extract: bool = False) ->
                  for p in placed]
     return {"source": str(src), "source_sha256": digest, "files": files,
             "sandbox_paths": [f"Desktop\\Input\\{f['name']}" for f in files]}
+
+
+# ---- end of a session: keep (to Downloads) or delete ------------------------------------------------
+
+KEEP_MAX = 20
+ZONE_INTERNET = "[ZoneTransfer]\r\nZoneId=3\r\n"
+
+
+def _is_link(path: Path, st: os.stat_result) -> bool:
+    return os.path.islink(path) or bool(getattr(st, "st_file_attributes", 0) & config.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _keep_target(inbox: Path, name) -> Path:
+    """inbox-relative name (as the tools reported it, e.g. "ZoomIt\\ZoomIt64.exe") -> a plain path inside."""
+    if not isinstance(name, str) or not name:
+        raise SandboxManagerError(INVALID_ARGUMENT, "keep names must be non-empty strings")
+    parts = re.split(r"[\\/]", name)
+    if PureWindowsPath(name).is_absolute() or PureWindowsPath(name).drive:
+        raise SandboxManagerError(POLICY_DENIED, f"only names inside the inbox: {name!r}")
+    p = inbox
+    for part in parts:
+        check_name(part)
+        p = p / part
+        try:
+            st = os.lstat(p)
+        except OSError:
+            raise SandboxManagerError(INVALID_ARGUMENT, f"not in the inbox: {name!r}") from None
+        if _is_link(p, st):
+            raise SandboxManagerError(POLICY_DENIED, f"link in the inbox: {name!r}")
+    if p.is_file() and os.lstat(p).st_nlink > 1:
+        raise SandboxManagerError(POLICY_DENIED, f"hard-linked file in the inbox: {name!r}")
+    return p
+
+
+def _mark_internet(path: Path) -> None:
+    """Mark of the Web: Windows (SmartScreen) asks before the Host runs it."""
+    try:
+        with open(f"{path}:Zone.Identifier", "w", encoding="ascii", newline="") as f:
+            f.write(ZONE_INTERNET)
+    except OSError:
+        pass                                           # not NTFS: nothing to mark
+
+
+def _copy_out(src: Path, dst: Path) -> list[Path]:
+    """Copy a file or folder tree out of the inbox without following links; returns the files written."""
+    if src.is_file():
+        shutil.copyfile(src, dst)                      # new file: Downloads' own permissions, not the inbox's
+        _mark_internet(dst)
+        return [dst]
+    dst.mkdir()
+    out = []
+    for e in os.scandir(src):
+        st = os.lstat(e.path)
+        if _is_link(Path(e.path), st) or (not e.is_dir(follow_symlinks=False) and st.st_nlink > 1):
+            continue                                   # links never leave the inbox
+        out += _copy_out(Path(e.path), dst / e.name)
+    return out
+
+
+def clear_inbox(inbox) -> int:
+    """Empty the inbox (the folder itself stays). Links are removed, never followed. Returns files removed."""
+    inbox = check_inbox_root(inbox)
+    return _clear(inbox)
+
+
+def _clear(folder: Path) -> int:
+    n = 0
+    for e in os.scandir(folder):
+        path = Path(e.path)
+        st = os.lstat(path)
+        if _is_link(path, st):
+            os.rmdir(path) if e.is_dir() and not os.path.islink(path) else os.unlink(path)
+        elif e.is_dir(follow_symlinks=False):
+            n += _clear(path)
+            os.rmdir(path)
+        else:
+            if not st.st_mode & 0o200:
+                os.chmod(path, 0o666)                  # read-only attribute
+            os.unlink(path)
+            n += 1
+    return n
+
+
+def finish_inbox(inbox, keep=(), dest=None) -> dict:
+    """Session end: copy each kept item to Downloads (marked as from the internet), then empty the inbox."""
+    inbox = check_inbox_root(inbox)
+    keep = list(keep or [])
+    if len(keep) > KEEP_MAX:
+        raise SandboxManagerError(INVALID_ARGUMENT, f"at most {KEEP_MAX} items can be kept")
+    targets = [(name, _keep_target(inbox, name)) for name in keep]       # all checked before anything moves
+    kept = []
+    if targets:
+        out_dir = check_source_folder(dest if dest is not None else downloads_folder())
+        for name, src in targets:
+            if src.is_file():
+                same = out_dir / src.name
+                if same.is_file() and same.stat().st_size == src.stat().st_size \
+                        and sha256_file(same) == sha256_file(src):
+                    kept.append({"name": name, "to": str(same), "files": 1, "already_there": True})
+                    continue
+            dst = unique_path(out_dir, src.name)
+            files = _copy_out(src, dst)
+            kept.append({"name": name, "to": str(dst), "files": len(files), "already_there": False})
+    deleted = _clear(inbox)
+    return {"kept": kept, "deleted_files": deleted}

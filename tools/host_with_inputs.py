@@ -33,7 +33,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))                     # this working tree, not the pinned pip copy in the Host venv
-from sandbox_manager import SandboxManagerError, config, register_input  # noqa: E402
+from sandbox_manager import SandboxManagerError, clear_inbox, config, register_input  # noqa: E402
 from sandbox_manager.inbox import InboxWatcher, check_inbox_root  # noqa: E402
 
 log = logging.getLogger("host-with-inputs")
@@ -85,34 +85,63 @@ class InputGate:
         return self._manager.prepare(session_id, runtime_id, generation, runner_exe, **kwargs)
 
 
-def _add_inbox_tools(mcp_server, inbox: Path, import_from: Path | None) -> None:
-    """Two more MCP tools (tools/inbox_download.py), answered here, outside the Broker:
-    inbox_download (https URL -> inbox) and inbox_import (a file already in Downloads -> inbox)."""
+    def cleanup(self, s):
+        """Session end (the Host calls stop → cleanup): stop watching, then the default — empty the inbox
+        (배주한 결정 2026-10-11). Whatever the user chose to keep was already copied by inbox_finish."""
+        result = self._manager.cleanup(s)
+        for w in [w for w in self.watchers if w.session is s]:
+            w.stop()
+            self.watchers.remove(w)
+        if self._inbox is not None:
+            try:
+                log.info("INBOX %s emptied at session end: %d files deleted", s.session_id, clear_inbox(self._inbox))
+            except (OSError, SandboxManagerError) as exc:
+                log.warning("INBOX %s could not be emptied: %s", s.session_id, exc)
+        return result
+
+
+def _add_inbox_tools(mcp_server, inbox: Path, user_folder: Path | None) -> None:
+    """Three more MCP tools (tools/inbox_download.py), answered here, outside the Broker:
+    inbox_download (https URL -> inbox), inbox_import (a file already in Downloads -> inbox),
+    inbox_finish (keep chosen items in Downloads, delete the rest)."""
     import json
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from inbox_download import IMPORT_TOOL, TOOL, DownloadError, download_into_inbox, import_into_inbox
+    from inbox_download import (FINISH_TOOL, IMPORT_TOOL, TOOL, DownloadError, download_into_inbox, finish,
+                                import_into_inbox)
 
-    # tool name -> (main argument, what to run)
-    tools = {TOOL["name"]: ("url", lambda arg, extract: download_into_inbox(arg, inbox, extract)),
-             IMPORT_TOOL["name"]: ("name", lambda arg, extract: import_into_inbox(arg, inbox, extract, import_from))}
+    def fetch_or_import(key, run):
+        def call(arguments):
+            arg, extract = arguments.get(key), arguments.get("extract", False)
+            if not isinstance(arg, str) or not isinstance(extract, bool) or set(arguments) - {key, "extract"}:
+                raise DownloadError("INVALID_ARGUMENT", f"arguments: {key} (string), extract (boolean) only")
+            body = run(arg, extract)
+            return arg, body, ", ".join(f"{f['name']} sha256={f['sha256']}" for f in body["files"])
+        return call
+
+    def keep_and_clear(arguments):
+        keep = arguments.get("keep", [])
+        if not isinstance(keep, list) or not all(isinstance(k, str) for k in keep) or set(arguments) - {"keep"}:
+            raise DownloadError("INVALID_ARGUMENT", "arguments: keep (list of names) only")
+        body = finish(keep, inbox, user_folder)
+        return keep, body, f"kept {[k['to'] for k in body['kept']]}, deleted {body['deleted_files']} files"
+
+    tools = {TOOL["name"]: fetch_or_import("url", lambda u, x: download_into_inbox(u, inbox, x)),
+             IMPORT_TOOL["name"]: fetch_or_import("name", lambda n, x: import_into_inbox(n, inbox, x, user_folder)),
+             FINISH_TOOL["name"]: keep_and_clear}
     load = mcp_server.load_tool_list
-    mcp_server.load_tool_list = lambda *a, **k: load(*a, **k) + [TOOL, IMPORT_TOOL]
+    mcp_server.load_tool_list = lambda *a, **k: load(*a, **k) + [TOOL, IMPORT_TOOL, FINISH_TOOL]
     call = mcp_server.HostBackend.call
 
     def patched(self, tool: str, arguments: dict) -> dict:
         if tool not in tools:
             return call(self, tool, arguments)
-        key, run = tools[tool]
-        arg, extract = arguments.get(key), arguments.get("extract", False)
-        extra = set(arguments) - {key, "extract"}
         try:
-            if not isinstance(arg, str) or not isinstance(extract, bool) or extra:
-                raise DownloadError("INVALID_ARGUMENT", f"arguments: {key} (string), extract (boolean) only")
-            body = {"ok": True, **run(arg, extract)}
-            log.info("%s %s -> %s", tool.upper(), arg, ", ".join(f"{f['name']} sha256={f['sha256']}" for f in body["files"]))
+            arg, body, summary = tools[tool](arguments)
+            log.info("%s %s -> %s", tool.upper(), arg, summary)
+            body = {"ok": True, **body}
             return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}], "isError": False}
         except DownloadError as e:
-            log.warning("%s %r refused: %s %s", tool.upper(), arg, e.code, e.message)
+            log.warning("%s %r refused: %s %s", tool.upper(), arguments, e.code, e.message)
             body = {"ok": False, "error": e.code, "message": e.message, "retryable": False}
             return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}], "isError": True}
 
@@ -130,7 +159,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--inbox", type=Path, default=None,
                     help="shared folder the Agent downloads into, mapped read-only (tools/setup_inbox.ps1 first)")
     ap.add_argument("--import-from", type=Path, default=None,
-                    help="folder inbox_import copies from, by file name only (default: the user's Downloads)")
+                    help="folder inbox_import copies from by file name, and inbox_finish keeps into "
+                         "(default: the user's Downloads)")
     a = ap.parse_args(mine)
     if len(a.input_source) > len(a.input):
         ap.error("more --input-source than --input")
@@ -146,7 +176,13 @@ def main(argv: list[str] | None = None) -> None:
     inbox = check_inbox_root(a.inbox) if a.inbox is not None else None   # refuse a bad folder before Codex starts
     mcp_server._real_sandbox_manager = lambda root: InputGate(real(root), files, DialogApprover()._ask, inbox)
     if inbox is not None:
+        # A new Host = a new conversation. What an earlier one left (it was killed before cleanup) was not
+        # chosen to be kept, so the default applies: delete. Logged once logging starts in mcp_server.main.
+        leftover = clear_inbox(inbox)
         _add_inbox_tools(mcp_server, inbox, a.import_from)
+        if leftover:
+            print(f"host-with-inputs: deleted {leftover} files left in the inbox by an earlier session",
+                  file=sys.stderr)
     mcp_server.main(rest)                          # logging starts here; the approval line names each file
 
 

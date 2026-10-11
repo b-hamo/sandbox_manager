@@ -31,4 +31,5 @@ Reply to the user in Korean, briefly.
 - If a tool returns `POLICY_DENIED`, do not work around it; tell the user.
 - If the Sandbox does not start, do not run the file on this PC instead; report it.
 - When done, **do not call `session_stop`**. Leave the Sandbox open for the user to look at; call `session_stop` only when the user says "끝내" / "종료해".
+- **Ending: keep or delete the inbox files.** By default everything in the inbox is deleted when the session ends. If the user wants to keep a file to use on this PC ("ZoomIt 남기고 끝내", "설치 파일은 남겨줘"), call `inbox_finish` with `keep` = the names exactly as `inbox_download` / `inbox_import` reported them (a folder name keeps the whole unpacked folder), then `session_stop`. Kept items go to the Downloads folder, marked as from the internet. If the user did not say, ask once ("받은 파일 중 PC에 남길 것이 있나요? 없으면 모두 지웁니다") before `session_stop`; "없어" → `session_stop` only. Tell the user where kept files went. Never run a kept file on this PC.
 - After `session_stop`, this conversation cannot start a Sandbox again (`SESSION_TERMINATED`): tell the user to open a new conversation.

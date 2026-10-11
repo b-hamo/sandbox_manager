@@ -107,6 +107,20 @@ r = import_to_inbox("ZoomIt.zip", inbox, extract=True)   # 원본 폴더 기본�
 - 임시 폴더에 해시하며 한 번 복사 → 원본이 그 사이 바뀌었으면 거부 → 받는 폴더에 새 이름으로(덮어쓰지 않음, `이름-2`). 이후는 받는 폴더와 같음(InboxWatcher 목록 → Guest 지킴이)
 - 지금은 Agent가 Host 도구 `inbox_import`(`tools/inbox_download.py`, `host_with_inputs.py --inbox`가 붙임, `--import-from`으로 원본 폴더 변경)로 부른다. 나중에 Host가 직접 부르게 바꿔도 검사는 이 함수 한 곳이라 그대로다
 
+### 세션이 끝날 때: 받는 폴더 유지/삭제 (2026-10-11)
+
+```python
+from sandbox_manager import clear_inbox, finish_inbox
+
+finish_inbox(inbox, keep=["ZoomIt"])   # 남길 것만 다운로드 폴더로 복사, 나머지는 받는 폴더에서 삭제
+clear_inbox(inbox)                     # 기본값: 전부 삭제 (받는 폴더 자체는 남김)
+```
+
+- **기본은 삭제**(배주한 결정). 남길 것을 고르면 **다운로드 폴더**로 간다. Sandbox에서 먼저 설치·실행해 보고 괜찮은 설치 파일을 PC에서 이어서 쓰기 위한 것
+- 남길 이름은 `inbox_download`·`inbox_import`가 알려 준 이름 그대로(`ZoomIt`처럼 폴더면 폴더째). `..`·절대 경로·링크·hard link는 거부하고, **하나라도 거부되면 아무것도 지우지 않는다**
+- 옮기지 않고 **복사**한다: 옮기면 받는 폴더의 "실행 금지" 권한이 따라가서 PC에서 실행이 안 된다(실제 확인). 복사본에는 **인터넷에서 받은 파일 표시**(Zone.Identifier, ZoneId=3)를 붙여 PC에서 실행할 때 Windows가 한 번 더 묻게 한다. 같은 이름은 `이름-2`, 다운로드 폴더에 똑같은 파일이 이미 있으면(`inbox_import`로 가져온 원본) 그대로 둔다
+- 시연용 Host(`host_with_inputs.py`): Agent 도구 `inbox_finish(keep)`, Host가 세션을 끝낼 때(`cleanup`) 받는 폴더를 비움, 새 Host가 켜질 때 지난 세션이 남긴 파일도 비움(Codex 창을 갑자기 닫은 경우)
+
 ### Host가 살아 있을 때 복구 (언제 할지는 Host가 정함)
 
 ```python
@@ -142,7 +156,7 @@ address = m.reset_sandbox(s, s.generation + 1)         # start()처럼 새 Host 
 | `sandbox_manager/config.py` | .wsb 생성과 매핑 안전 검사, Guest 시작 스크립트, Guest 파일 지킴이(`INPUT_WATCH_PS1`) |
 | `sandbox_manager/inputs.py` | 파일 등록 `register_input()` (다 받아진 파일만, 크기·SHA-256·출처 고정) |
 | `sandbox_manager/inbox.py` | 받는 폴더: `check_inbox_root()`, `InboxScanner`(다 받아진 파일 목록·링크 삭제), `InboxWatcher` |
-| `sandbox_manager/importer.py` | 이미 받아 둔 파일을 받는 폴더로 복사 `import_to_inbox()` (다운로드 폴더 바로 안, 이름만, 링크·hard link 거부), zip 안전하게 풀기 |
+| `sandbox_manager/importer.py` | 이미 받아 둔 파일을 받는 폴더로 복사 `import_to_inbox()` (다운로드 폴더 바로 안, 이름만, 링크·hard link 거부), zip 안전하게 풀기, 세션 끝 `finish_inbox()`(남길 것만 다운로드 폴더로·나머지 삭제)·`clear_inbox()` |
 | `sandbox_manager/firewall.py` | Host 방화벽 규칙이 현재 어댑터에 묶였는지, 17443·17444 허용·나머지 차단인지 검사(읽기만) |
 | `sandbox_manager/wsb.py` | `wsb` CLI 감싸기 (start, running, ip, connect, stop, exec — exec는 Runner 재시작 고정 명령에만) |
 | `sandbox_manager/network.py` | vSwitch 주소, Guest로 가는 Host 주소 |
@@ -155,10 +169,10 @@ address = m.reset_sandbox(s, s.generation + 1)         # start()처럼 새 Host 
 | `tools/recovery_e2e.py` | 실제 Host·Runner로 복구 시험: READY 뒤 Host 강제 종료 → `restart_runner()` 후 같은 Sandbox에서 데모 완료 → `reset_sandbox()` 후 새 Sandbox에서 데모 완료 → 남은 Sandbox 없음. host_control venv로 실행 |
 | `tools/mcp_e2e.py` | Codex 역할: host_control `mcp_server.py`를 MCP stdio로 불러 task_submit → observe → click → type → session_stop, 끝난 뒤 Sandbox 남음 없음 확인. host_control venv로 실행 |
 | `tools/repeat_e2e.py` | `e2e_host.py`를 N회 연속 실행하고 회차 사이 남은 Sandbox·인증서·세션 파일 검사 (5.9) |
-| `tests/test_importer.py` | `import_to_inbox` 15개: 복사·원본 유지·덮어쓰기 안 함·zip 풀기, 경로·`..`·스트림·장치 이름 거부, hard link·junction 거부, 복사 중 바뀐 파일 거부, MCP 도구 모양 |
+| `tests/test_importer.py` | `import_to_inbox` 15개 + 세션 끝 유지/삭제 8개(기본 삭제, 파일·폴더 유지, 덮어쓰기 안 함, 잘못된 이름이면 아무것도 안 지움, 링크 안 따라감, Host 감싸개 cleanup): 복사·원본 유지·덮어쓰기 안 함·zip 풀기, 경로·`..`·스트림·장치 이름 거부, hard link·junction 거부, 복사 중 바뀐 파일 거부, MCP 도구 모양 |
 | `tests/test_guest_scripts.py` | Guest 파일 지킴이를 이 PC의 Windows PowerShell 5.1로 실제 실행(경로만 임시 폴더로): 여러 항목·하위 폴더·해시 불일치·`..` 이름 |
 | `tools/setup_inbox.ps1` | 받는 폴더 만들기 + 실행 거부 권한 + Host에서 실행 안 되는지 확인 (관리자 아님) |
-| `tools/inbox_download.py` | (시연용, Host 몫) MCP 도구 2개: `inbox_download`(https 공개 주소에서 받는 폴더로 내려받기, zip 풀기), `inbox_import`(다운로드 폴더의 파일을 이름으로 복사) |
+| `tools/inbox_download.py` | (시연용, Host 몫) MCP 도구 2개: `inbox_download`(https 공개 주소에서 받는 폴더로 내려받기, zip 풀기), `inbox_import`(다운로드 폴더의 파일을 이름으로 복사), `inbox_finish`(남길 것만 다운로드 폴더로, 나머지 삭제) |
 | `tools/host_with_inputs.py` | (시연용) host_control `mcp_server.py`를 고치지 않고 감싸서 `--input`(승인 창 뒤 사본) 또는 `--inbox`(받는 폴더 + `inbox_download`·`inbox_import` 도구, `--import-from`)를 붙임 |
 | `codex_skill/secure-sandbox-run/SKILL.md` | Codex Skill: 받기 → Sandbox → `input-check.html` 확인 → Sandbox 안에서 실행 절차 |
 | `tools/install_firewall.ps1` / `uninstall_firewall.ps1` | 방화벽 규칙 + 재부팅 후 자동 복구 예약 작업 설치/제거 (관리자, 한 번) |
@@ -174,8 +188,10 @@ python tools/smoke_real.py <sandbox_runner.exe>
 
 | 시험 | 결과 (2026-09-29, KISIA PC) |
 |---|---|
+| **Sandbox에서 확인 후 PC에 남기기** (JH PC 2026-10-11, 같은 Host·Runner·Codex) | **PASS** — Codex에 "다운로드 폴더에 있는 ZoomIt.zip 을 Sandbox에서 실행해서 창이 뜨는지만 확인하고, 압축 푼 ZoomIt 폴더는 PC에 남기고 끝내줘" → `inbox_import` → Sandbox 안 4개 `OK` → `ZoomIt64.exe` 라이선스 창 확인 → `inbox_finish(keep)` → `session_stop`. `Downloads\ZoomIt`에 4개 파일·인터넷 표시(ZoneId=3), 받는 폴더 비어 있음, 남은 Sandbox 없음. 따로: 받는 폴더 안 exe는 PC 실행 거부, 다운로드 폴더로 남긴 사본은 실행됨·거부 권한 없음(whoami 사본으로 확인) |
 | **다운로드 폴더에 받아 둔 파일을 Sandbox에서 실행** (JH PC 2026-10-10, 같은 Host·Runner·Codex) | **PASS** — Codex에 "다운로드 폴더에 있는 ZoomIt.zip 을 Sandbox에서 실행해줘" → Codex가 `inbox_import`(이름만, 압축 풀기) → Sandbox 안 `OK`, SHA-256 같음 → Sandbox 안에서 `ZoomIt64.exe` 실행, **라이선스 창까지 확인**. 다운로드 폴더 원본 그대로, Codex의 Host 명령은 Skill 읽기 1번뿐, Host에 ZoomIt 프로세스 없음 |
 | **받는 폴더로 받아 Sandbox에서 실행** (JH PC 2026-10-08, host_control develop `7aa6f84` + Runner `0c25213`, Host 무수정, Codex `0.162.0-alpha.2`) | **PASS** — Codex에 "ZoomIt.zip 받아서 실행해줘" → `inbox_download`로 받기·압축 풀기 → Sandbox 안 `OK`, SHA-256 원본과 같음 → Sandbox 안에서 실행, **ZoomIt 라이선스 창까지 확인**(기능은 안 봄). Codex의 Host 명령 0번, Host에 ZoomIt 실행 흔적 없음. 받는 폴더 파일은 Host에서 실행 거부(Access is denied), Sandbox는 복사 후 실행 가능, Sandbox는 그 폴더에 못 씀. reset 뒤 다시 연결은 자동 시험으로만 확인 |
+| 자동 시험 (2026-10-11) | 113개 중 112개 통과·1개 건너뜀(symlink 권한) (세션 끝 유지/삭제 8개 추가) |
 | 자동 시험 (2026-10-10) | 105개 중 104개 통과·1개 건너뜀(symlink 권한) (`import_to_inbox` 15개 추가) |
 | 자동 시험 (2026-10-08) | 90개 중 89개 통과·1개 건너뜀(symlink 권한) (받는 폴더 8개, 지킴이 실제 PowerShell 1개 포함) |
 | 자동 시험 (이전) | 77개 통과·1개 건너뜀 (`test_manager` 64: 동시 호출·주인 없는 Sandbox 회수·Runner 재시작·Sandbox 재설정·사용자 파일 넣기 포함, `test_isolation` 13. 링크 거부 시험은 symlink 권한이 없는 PC에서 건너뜀) |

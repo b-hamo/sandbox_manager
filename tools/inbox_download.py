@@ -26,7 +26,7 @@ import urllib.request
 from pathlib import Path, PureWindowsPath
 
 from sandbox_manager import SandboxManagerError, config
-from sandbox_manager.importer import extract_zip, import_to_inbox, safe_name, sha256_file as _sha256
+from sandbox_manager.importer import extract_zip, finish_inbox, import_to_inbox, safe_name, sha256_file as _sha256
 from sandbox_manager.importer import unique_path as _unique
 
 MAX_REDIRECTS = 5
@@ -177,3 +177,32 @@ def import_into_inbox(name: str, inbox: Path, extract: bool = False, source_dir:
     except SandboxManagerError as e:
         raise DownloadError(e.code, e.message) from None
     return {**body, "next": NEXT_STEP}
+
+
+FINISH_TOOL = {
+    "name": "inbox_finish",
+    "description": ("End of the work with the inbox: copy the items the user wants to keep into this computer's "
+                    "Downloads folder (marked as downloaded from the internet, so Windows asks before running "
+                    "them), then delete everything in the inbox. keep=[] (the default) keeps nothing. Use the "
+                    "names exactly as inbox_download / inbox_import reported them; a folder name (e.g. an "
+                    "unpacked zip) keeps the whole folder. Call it only when the user said what to keep, before "
+                    "session_stop. If you never call it, the inbox is emptied anyway when the session ends."),
+    "inputSchema": {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "keep": {"type": "array", "maxItems": 20, "default": [],
+                     "items": {"type": "string", "minLength": 1, "maxLength": 1024},
+                     "description": "inbox names to keep in Downloads; empty = delete everything"},
+        },
+    },
+    "annotations": {"title": "Keep chosen inbox files in Downloads, delete the rest", "readOnlyHint": False,
+                    "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+}
+
+
+def finish(keep: list, inbox: Path, dest: Path | None = None) -> dict:
+    """The MCP tool: sandbox_manager.finish_inbox does every check; nothing is deleted if a name is refused."""
+    try:
+        return finish_inbox(inbox, keep, dest)
+    except SandboxManagerError as e:
+        raise DownloadError(e.code, e.message) from None
