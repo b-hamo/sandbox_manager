@@ -100,39 +100,86 @@ class InputGate:
         return result
 
 
-def _add_inbox_tools(mcp_server, inbox: Path, user_folder: Path | None) -> None:
+CONFIRM_TITLE = "샌드박스 작업 확인"
+# What Codex did on its own in the app (2026-10-12) although the Skill said otherwise: it skipped the
+# Skill, fetched a different package from the web although the file was in Downloads, copied it to
+# Downloads without being asked, and ended the Sandbox by itself. Rules in text are not enough: the
+# steps that touch this PC or end the user's Sandbox now need a "예" from the person at the Host.
+STOP_RULE = (" ONLY when the user explicitly says to end it (\"끝내\", \"종료해\"). Never end the Sandbox on "
+             "your own, not even after a failure: leave it open and report. The user is asked to confirm on "
+             "screen; if they say no, the Sandbox stays open.")
+
+
+def _add_inbox_tools(mcp_server, inbox: Path, user_folder: Path | None, ask=None) -> None:
     """Three more MCP tools (tools/inbox_download.py), answered here, outside the Broker:
     inbox_download (https URL -> inbox), inbox_import (a file already in Downloads -> inbox),
-    inbox_finish (keep chosen items in Downloads, delete the rest)."""
+    inbox_finish (keep chosen items in Downloads, delete the rest).
+    `ask(text, title) -> bool` is the Host's own yes/no dialog (45 s, no answer = no)."""
     import json
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from inbox_download import (FINISH_TOOL, IMPORT_TOOL, TOOL, DownloadError, download_into_inbox, finish,
-                                import_into_inbox)
+                                import_into_inbox, similar_files)
+    from sandbox_manager.importer import downloads_folder
+    ask = ask or (lambda text, title: False)
 
-    def fetch_or_import(key, run):
+    def fetch_or_import(key, run, check=None):
         def call(arguments):
             arg, extract = arguments.get(key), arguments.get("extract", False)
             if not isinstance(arg, str) or not isinstance(extract, bool) or set(arguments) - {key, "extract"}:
                 raise DownloadError("INVALID_ARGUMENT", f"arguments: {key} (string), extract (boolean) only")
+            if check:
+                check(arg)
             body = run(arg, extract)
             return arg, body, ", ".join(f"{f['name']} sha256={f['sha256']}" for f in body["files"])
         return call
+
+    def download_check(url):
+        same = similar_files(user_folder or downloads_folder(), url)
+        if same and not ask("AI가 인터넷에서 새 파일을 받으려고 합니다.\n\n받을 주소: " + url +
+                            "\n\n그런데 다운로드 폴더에 비슷한 파일이 이미 있습니다:\n  " + "\n  ".join(same) +
+                            "\n\n그래도 인터넷에서 새로 받을까요?\n(\"아니요\"면 받지 않습니다. 45초 안에 답이 없으면 아니요)",
+                            CONFIRM_TITLE):
+            raise DownloadError("POLICY_DENIED", "The user's Downloads folder already has " + ", ".join(same) +
+                                " and the user did not approve downloading another file. Use inbox_import with "
+                                "that file's name instead.")
 
     def keep_and_clear(arguments):
         keep = arguments.get("keep", [])
         if not isinstance(keep, list) or not all(isinstance(k, str) for k in keep) or set(arguments) - {"keep"}:
             raise DownloadError("INVALID_ARGUMENT", "arguments: keep (list of names) only")
+        if keep and not ask("AI가 샌드박스에 넣었던 파일을 이 PC의 다운로드 폴더에 남기려고 합니다.\n\n  " +
+                            "\n  ".join(keep) + "\n\n남길까요?\n(\"아니요\"면 아무것도 남기지 않습니다. "
+                            "45초 안에 답이 없으면 아니요)", CONFIRM_TITLE):
+            raise DownloadError("POLICY_DENIED", "The user did not approve keeping these files; nothing was kept. "
+                                "Keep files only when the user asked for it in the chat.")
         body = finish(keep, inbox, user_folder)
         return keep, body, f"kept {[k['to'] for k in body['kept']]}, deleted {body['deleted_files']} files"
 
-    tools = {TOOL["name"]: fetch_or_import("url", lambda u, x: download_into_inbox(u, inbox, x)),
+    tools = {TOOL["name"]: fetch_or_import("url", lambda u, x: download_into_inbox(u, inbox, x), download_check),
              IMPORT_TOOL["name"]: fetch_or_import("name", lambda n, x: import_into_inbox(n, inbox, x, user_folder)),
              FINISH_TOOL["name"]: keep_and_clear}
     load = mcp_server.load_tool_list
-    mcp_server.load_tool_list = lambda *a, **k: load(*a, **k) + [TOOL, IMPORT_TOOL, FINISH_TOOL]
+
+    def tool_list(*a, **k):
+        listed = load(*a, **k)
+        for t in listed:
+            if t["name"] == "session_stop":
+                t["description"] = t["description"].rstrip() + STOP_RULE
+        return listed + [TOOL, IMPORT_TOOL, FINISH_TOOL]
+    mcp_server.load_tool_list = tool_list
     call = mcp_server.HostBackend.call
 
     def patched(self, tool: str, arguments: dict) -> dict:
+        if tool == "session_stop":
+            if not ask("AI가 샌드박스를 끝내려고 합니다.\n\n끝내면 샌드박스 안의 모든 것이 사라집니다.\n"
+                       "끝낼까요?\n(\"아니요\"면 샌드박스를 계속 열어 둡니다. 45초 안에 답이 없으면 아니요)",
+                       CONFIRM_TITLE):
+                log.warning("SESSION_STOP refused by the user: the Sandbox stays open")
+                body = {"ok": False, "error": "POLICY_DENIED", "retryable": False,
+                        "message": "The user chose to keep the Sandbox open. Do not call session_stop again "
+                                   "unless the user says to end it."}
+                return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}], "isError": True}
+            return call(self, tool, arguments)
         if tool not in tools:
             return call(self, tool, arguments)
         try:
@@ -179,7 +226,7 @@ def main(argv: list[str] | None = None) -> None:
         # A new Host = a new conversation. What an earlier one left (it was killed before cleanup) was not
         # chosen to be kept, so the default applies: delete. Logged once logging starts in mcp_server.main.
         leftover = clear_inbox(inbox)
-        _add_inbox_tools(mcp_server, inbox, a.import_from)
+        _add_inbox_tools(mcp_server, inbox, a.import_from, DialogApprover()._ask)
         if leftover:
             print(f"host-with-inputs: deleted {leftover} files left in the inbox by an earlier session",
                   file=sys.stderr)

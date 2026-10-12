@@ -268,6 +268,85 @@ class HostWrapperCleanup(unittest.TestCase):
         self.assertEqual(list(self.inbox.iterdir()), [])
 
 
+class HostWrapperConfirm(unittest.TestCase):
+    """What Codex did on its own (2026-10-12) needs a "예" on the Host screen now: keeping files on the PC,
+    ending the Sandbox, and fetching another file from the web when a similar one is in Downloads."""
+
+    setUp, put = ImportToInbox.setUp, ImportToInbox.put
+
+    def wrap(self, answer):
+        import json
+        import types
+        from host_with_inputs import _add_inbox_tools
+        self.asked, self.host_calls = [], []
+
+        def ask(text, title):
+            self.asked.append(text)
+            return answer
+        host_calls = self.host_calls
+
+        class Backend:
+            def call(self, tool, arguments):
+                host_calls.append(tool)
+                return {"content": [{"type": "text", "text": json.dumps({"ok": True})}], "isError": False}
+        server = types.SimpleNamespace(
+            HostBackend=Backend,
+            load_tool_list=lambda *a, **k: [{"name": "session_stop", "description": "End the session."}])
+        _add_inbox_tools(server, self.inbox, self.downloads, ask)
+        self.server = server
+        return lambda tool, args: json.loads(Backend().call(tool, args)["content"][0]["text"])
+
+    def test_keeping_files_needs_a_yes(self):
+        call = self.wrap(False)
+        (self.inbox / "setup.msi").write_bytes(b"x")
+        body = call("inbox_finish", {"keep": ["setup.msi"]})
+        self.assertEqual(body["error"], "POLICY_DENIED")
+        self.assertEqual(list(self.downloads.iterdir()), [])            # nothing kept
+        self.assertTrue((self.inbox / "setup.msi").is_file())           # nothing deleted either
+        self.assertIn("setup.msi", self.asked[0])
+        call = self.wrap(True)
+        self.assertTrue(call("inbox_finish", {"keep": ["setup.msi"]})["ok"])
+        self.assertTrue((self.downloads / "setup.msi").is_file())
+
+    def test_keeping_nothing_asks_nothing(self):
+        call = self.wrap(False)
+        self.assertTrue(call("inbox_finish", {"keep": []})["ok"])
+        self.assertEqual(self.asked, [])
+
+    def test_ending_the_sandbox_needs_a_yes(self):
+        call = self.wrap(False)
+        self.assertEqual(call("session_stop", {"reason": "CANNOT_COMPLETE"})["error"], "POLICY_DENIED")
+        self.assertEqual(self.host_calls, [])                           # the Host never saw it
+        call = self.wrap(True)
+        self.assertTrue(call("session_stop", {"reason": "TASK_COMPLETE"})["ok"])
+        self.assertEqual(self.host_calls, ["session_stop"])
+
+    def test_stop_rule_is_in_the_tool_description(self):
+        self.wrap(True)
+        stop = next(t for t in self.server.load_tool_list() if t["name"] == "session_stop")
+        self.assertIn("끝내", stop["description"])
+        names = [t["name"] for t in self.server.load_tool_list()]
+        self.assertEqual(names, ["session_stop", "inbox_download", "inbox_import", "inbox_finish"])
+
+    def test_web_download_of_something_already_in_downloads_needs_a_yes(self):
+        self.put("tailscale-setup-1.102.4.exe")
+        call = self.wrap(False)
+        with mock.patch("inbox_download.download_into_inbox") as dl:
+            body = call("inbox_download", {"url": "https://pkgs.example.com/tailscale-setup-1.102.4-amd64.msi"})
+        self.assertEqual(body["error"], "POLICY_DENIED")
+        self.assertIn("tailscale-setup-1.102.4.exe", body["message"])
+        dl.assert_not_called()
+
+    def test_similar_files(self):
+        from inbox_download import similar_files
+        for n in ("tailscale-setup-1.102.4.exe", "setup.exe", "ZoomIt.zip"):
+            self.put(n)
+        self.assertEqual(similar_files(self.downloads, "https://x.example/tailscale-setup-1.102.4-amd64.msi"),
+                         ["tailscale-setup-1.102.4.exe"])
+        self.assertEqual(similar_files(self.downloads, "https://x.example/setup-helper.msi"), [])  # too short a match
+        self.assertEqual(similar_files(self.downloads, "https://x.example/other-tool.exe"), [])
+
+
 class ImportTool(unittest.TestCase):
     """tools/inbox_download.py: the MCP tool shape around import_to_inbox."""
 
