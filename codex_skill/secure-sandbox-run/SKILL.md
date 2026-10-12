@@ -25,7 +25,12 @@ Reply to the user in Korean, briefly.
    - If it is still missing or says `FAIL`, do not run the file; report it. Never re-download it inside the Sandbox instead.
 5. Open things by **double-clicking desktop icons** (the `Input` folder opens in Explorer) or use `computer_hotkey` with `keys: ["win", "r"]` to open the Run dialog inside the Sandbox. This requires host_control policy `POL-0.1.1` or later; after updating the Host, start a new session. The Sandbox has no Notepad, so `.txt` files do not open. If an older Host returns `POLICY_DENIED`, report that the Host needs updating; do not work around the denial.
 6. Run the program by double-clicking it in the `Input` folder (GUI actions through scrp only).
-7. Say it ran only after `computer_observe` shows its window. If only a license window appeared, say exactly "라이선스 창까지 확인" and do not accept the license unless the user asks.
+7. **Inside the Sandbox, finish the job without asking** (배주한 결정 2026-10-12: the Sandbox is thrown away afterwards, so nothing there touches this PC):
+   - If the user asked to install or run it ("설치해줘", "실행해줘", "깔아줘"), go all the way: tick the license agreement, press Next / Install / Finish, accept default options, and launch the program. Do not stop to ask. The user asking for the install counts as their agreement to the license.
+   - If the user only asked to check it ("열리는지만 봐줘", "창이 뜨는지만"), stop when its first window (or license window) appears and say so.
+   - **Stop and ask** only for: sign-in, passwords, payment, personal information, or anything that would send the user's data somewhere. Never type such data yourself.
+   - UAC prompts inside the Sandbox: press Yes (the Sandbox user is an administrator of the Sandbox only).
+8. Say it ran or was installed only after `computer_observe` shows it.
 
 ## 3. Rules
 - If a tool returns `POLICY_DENIED`, do not work around it; tell the user.
