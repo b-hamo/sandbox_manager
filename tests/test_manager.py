@@ -125,7 +125,7 @@ class Base(unittest.TestCase):
     def manager(self, net=None, firewall=None):
         return SandboxManager(self.root, wsb=self.wsb, network=net or FakeNet(), firewall=firewall or FakeFirewall(),
                               clock=self.clock, sleep=self.clock.sleep, ip_wait_s=10, stop_verify_s=5,
-                              process_started=self.procs)
+                              process_started=self.procs, window_behind=False)
 
     def started(self, m=None):
         m = m or self.manager()
@@ -588,7 +588,7 @@ class Recovery(Base):
     def test_limit_is_configurable(self):
         m = SandboxManager(self.root, wsb=self.wsb, network=FakeNet(), firewall=FakeFirewall(), clock=self.clock,
                            sleep=self.clock.sleep, ip_wait_s=10, stop_verify_s=5, process_started=self.procs,
-                           max_restarts=0)
+                           max_restarts=0, window_behind=False)
         m, s = self.running_session(m)
         self.assertCode("RUNTIME_UNAVAILABLE", m.restart_runner, s, 2)
         m.stop(s, "TASK_COMPLETE")
@@ -930,6 +930,38 @@ class Inbox(Base):
                     self.root):
             self.assertCode("INVALID_ARGUMENT", m.prepare, "SES-1", "RT-SBX-001", 1, self.runner, inbox=bad)
         self.assertFalse((self.root / "sessions" / "SES-1").exists())
+
+
+class WindowBehind(Base):
+    """start(): the Sandbox window must not stay in front of the user's work (window.py)."""
+
+    def make(self, behind):
+        return SandboxManager(self.root, wsb=self.wsb, network=FakeNet(), firewall=FakeFirewall(), clock=self.clock,
+                              sleep=self.clock.sleep, ip_wait_s=10, stop_verify_s=5, process_started=self.procs,
+                              window_behind=behind)
+
+    def test_user_window_is_remembered_before_connect_and_watched(self):
+        order = []
+        real_connect = self.wsb.connect
+        with mock.patch("sandbox_manager.window.foreground", side_effect=lambda: order.append("fg") or 1234), \
+                mock.patch("sandbox_manager.window.keep_behind") as keep, \
+                mock.patch.object(self.wsb, "connect", side_effect=lambda sid: (order.append("connect"),
+                                                                               real_connect(sid))):
+            self.started(self.make(True))
+        self.assertEqual(order, ["fg", "connect"])               # remembered before the window can appear
+        keep.assert_called_once()
+        self.assertEqual(keep.call_args.args, (1234,))
+
+    def test_can_be_turned_off(self):
+        with mock.patch("sandbox_manager.window.foreground") as fg, \
+                mock.patch("sandbox_manager.window.keep_behind") as keep:
+            self.started(self.make(False))
+        fg.assert_not_called()
+        keep.assert_not_called()
+
+    def test_no_user_window_nothing_to_do(self):
+        from sandbox_manager import window
+        self.assertIsNone(window.keep_behind(None))
 
 
 class WsbExec(unittest.TestCase):

@@ -51,7 +51,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Callable, TypeVar
 
-from . import config
+from . import config, window
 from .errors import (INVALID_ARGUMENT, RUNTIME_START_FAILED, RUNTIME_UNAVAILABLE,
                                     SandboxManagerError)
 from .firewall import FIX_COMMAND, FirewallCheck
@@ -174,7 +174,7 @@ class SandboxManager:
                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
                  ip_wait_s: float = 120, stop_verify_s: float = 30, firewall_wait_s: float = 20,
                  process_started: Callable[[int], int | None] = process_started, max_restarts: int = 3,
-                 log: Callable[[str], None] | None = None):
+                 log: Callable[[str], None] | None = None, window_behind: bool = True):
         self.root = (root or default_root()).resolve()
         onedrive = os.environ.get("OneDrive")
         if onedrive and str(self.root).lower().startswith(str(Path(onedrive).resolve()).lower()):
@@ -192,6 +192,8 @@ class SandboxManager:
         # Safety cap per session (D-7). The Host's own policy decides when to restart; this only stops a loop.
         self.max_restarts = max_restarts
         self.log = log or (lambda msg: None)
+        # 배주한 요청 2026-10-12: the Sandbox window opens behind the user's work, not in front (window.py).
+        self.window_behind = window_behind
         self._t0: dict[str, float] = {}
         self._locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
@@ -437,7 +439,10 @@ class SandboxManager:
             s.sandbox_id = self.wsb.start(xml)
             self._mark(s, "sandbox_started")
             self._event(s, "SANDBOX_STARTED", sandbox_id=s.sandbox_id)
+            user_window = window.foreground() if self.window_behind else None
             self.wsb.connect(s.sandbox_id)                   # LogonCommand waits for the window (PoC)
+            if user_window:
+                window.keep_behind(user_window, log=self.log)  # never minimized: the Guest screen must stay drawn
 
             deadline = self.clock() + self.ip_wait_s
             while not s.guest_ip and self.clock() < deadline:
