@@ -963,6 +963,14 @@ class WindowBehind(Base):
         from sandbox_manager import window
         self.assertIsNone(window.keep_behind(None))
 
+    def test_only_a_real_choice_keeps_the_sandbox_in_front(self):
+        from sandbox_manager.window import user_chose
+        self.assertTrue(user_chose("Shell_TrayWnd", 99))            # picked from the taskbar
+        self.assertTrue(user_chose("XamlExplorerHostIslandWindow", 99))   # Alt+Tab
+        self.assertTrue(user_chose("Chrome_WidgetWin_1", 0.1))      # clicked on the Sandbox window
+        self.assertFalse(user_chose("Chrome_WidgetWin_1", 5.0))     # popped up while the user typed
+        self.assertFalse(user_chose("ConsoleWindowClass", 1e9))
+
 
 class WsbExec(unittest.TestCase):
     def test_exit_code_from_text(self):
