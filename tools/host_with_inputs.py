@@ -195,6 +195,97 @@ def _add_inbox_tools(mcp_server, inbox: Path, user_folder: Path | None, ask=None
     mcp_server.HostBackend.call = patched
 
 
+# ---- one Host at a time, started when it is needed (2026-10-12) ---------------------------------------
+# The Codex app starts one MCP server (this Host) per conversation and keeps all of them running while
+# the app is open, even after "끝내". The first one held ports 17443/17444, so every later conversation
+# failed with WinError 10048. Now a Host opens its ports only when the Agent first needs it (task_submit
+# and the other Host tools), and the conversation that starts working takes over: an older Host of ours
+# still holding the port is ended (its Sandbox, if any, is reclaimed by the next start as an orphan).
+OUR_HOST_MARKERS = ("host_with_inputs.py", "host\\mcp_server.py", "host/mcp_server.py")
+
+
+def _listening_pids(port: int) -> set[int]:
+    import subprocess
+    out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, errors="replace").stdout
+    pids = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[1].endswith(f":{port}") and parts[3].upper() == "LISTENING":
+            pids.add(int(parts[4]))
+    return pids
+
+
+def _process_info(pid: int) -> tuple[str, int]:
+    """(command line, parent pid) of a process; ("", 0) if unknown."""
+    import subprocess
+    ps = (f"$p = Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}'; "
+          "if ($p) { \"$($p.ParentProcessId)`t$($p.CommandLine)\" }")
+    out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
+                         errors="replace").stdout.strip()
+    if "\t" not in out:
+        return "", 0
+    parent, cmd = out.split("\t", 1)
+    return cmd, int(parent or 0)
+
+
+def take_over_ports(ports=(17443, 17444), *, me: int | None = None, wait_s: float = 8.0,
+                    listening=_listening_pids, info=_process_info, kill=None) -> list[int]:
+    """End OUR older Host processes that hold the ports. Never touches anything else. Returns pids ended."""
+    import os
+    import time
+    me = me or os.getpid()
+    kill = kill or (lambda pid: os.kill(pid, 9))
+    ended = []
+    for port in ports:
+        for pid in listening(port):
+            if pid == me or pid in ended:
+                continue
+            cmd, parent = info(pid)
+            if not any(m in cmd for m in OUR_HOST_MARKERS):
+                continue                                      # someone else's program: leave it, fail as before
+            victims = [pid]
+            parent_cmd, _ = info(parent) if parent else ("", 0)
+            if parent and parent != me and any(m in parent_cmd for m in OUR_HOST_MARKERS):
+                victims.append(parent)                        # the venv launcher of that Host
+            for v in victims:
+                try:
+                    kill(v)
+                    ended.append(v)
+                except OSError:
+                    pass
+    end = time.monotonic() + wait_s
+    while ended and time.monotonic() < end and any(listening(p) for p in ports):
+        time.sleep(0.2)
+    return ended
+
+
+def _start_when_needed(mcp_server, inbox: Path | None, local_tools=frozenset()) -> None:
+    """Defer the Host backend (ports) to the first tool call that needs it; take over the ports then."""
+    real_start = mcp_server.HostBackend.start
+    call = mcp_server.HostBackend.call
+
+    def deferred_start(self):
+        self._deferred_start = True                           # McpServer calls this at "initialize"
+
+    def call_when_needed(self, tool, arguments):
+        if tool in local_tools:
+            self._used_inbox = True                           # files this conversation already put in
+        elif getattr(self, "_deferred_start", False) and self.ident is None:
+            self._deferred_start = False
+            ended = take_over_ports()
+            if ended:
+                log.warning("HOST took over ports 17443/17444 from an older conversation's Host (pids %s)", ended)
+            if inbox is not None and not getattr(self, "_used_inbox", False):
+                n = clear_inbox(inbox)                        # what an older conversation left: default is delete
+                if n:
+                    log.info("INBOX emptied before starting: %d files left by an earlier session", n)
+            real_start(self)
+        return call(self, tool, arguments)
+
+    mcp_server.HostBackend.start = deferred_start
+    mcp_server.HostBackend.call = call_when_needed
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     rest = argv[argv.index("--") + 1:] if "--" in argv else []
@@ -223,13 +314,10 @@ def main(argv: list[str] | None = None) -> None:
     inbox = check_inbox_root(a.inbox) if a.inbox is not None else None   # refuse a bad folder before Codex starts
     mcp_server._real_sandbox_manager = lambda root: InputGate(real(root), files, DialogApprover()._ask, inbox)
     if inbox is not None:
-        # A new Host = a new conversation. What an earlier one left (it was killed before cleanup) was not
-        # chosen to be kept, so the default applies: delete. Logged once logging starts in mcp_server.main.
-        leftover = clear_inbox(inbox)
         _add_inbox_tools(mcp_server, inbox, a.import_from, DialogApprover()._ask)
-        if leftover:
-            print(f"host-with-inputs: deleted {leftover} files left in the inbox by an earlier session",
-                  file=sys.stderr)
+    # The inbox is emptied (default: delete) when this Host actually starts, not when a conversation opens:
+    # the Codex app opens a Host per conversation, and an idle one must not wipe another one's files.
+    _start_when_needed(mcp_server, inbox, frozenset({"inbox_download", "inbox_import", "inbox_finish"}))
     mcp_server.main(rest)                          # logging starts here; the approval line names each file
 
 

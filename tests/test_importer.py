@@ -365,3 +365,55 @@ class ImportTool(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostOnePerPC(unittest.TestCase):
+    """The Codex app keeps one Host per conversation running: only the one that starts working holds the ports."""
+
+    def test_only_our_older_host_is_ended(self):
+        from host_with_inputs import take_over_ports
+        procs = {101: ("python.exe tools/host_with_inputs.py --inbox x", 100),
+                 100: ("venv\Scripts\python.exe C:/x/tools/host_with_inputs.py --inbox x", 50),
+                 202: ("C:\Program Files\Other\server.exe --port 17443", 1)}
+        held = {17443: {101}, 17444: {101}}
+        killed = []
+
+        def kill(pid):
+            killed.append(pid)
+            for s in held.values():
+                s.discard(pid)
+        ended = take_over_ports(me=999, listening=lambda p: set(held[p]), info=lambda pid: procs.get(pid, ("", 0)),
+                                kill=kill, wait_s=0.1)
+        self.assertEqual(sorted(ended), [100, 101])                  # the Host and its venv launcher
+        held = {17443: {202}, 17444: set()}
+        killed.clear()
+        self.assertEqual(take_over_ports(me=999, listening=lambda p: set(held[p]),
+                                         info=lambda pid: procs.get(pid, ("", 0)), kill=kill, wait_s=0.1), [])
+        self.assertEqual(killed, [])                                 # someone else's program is never touched
+
+    def test_backend_starts_only_when_a_host_tool_is_called(self):
+        import types
+        from host_with_inputs import _start_when_needed
+        started, calls = [], []
+
+        class Backend:
+            ident = None
+
+            def start(self):
+                started.append(True)
+
+            def call(self, tool, arguments):
+                calls.append(tool)
+                return {}
+        server = types.SimpleNamespace(HostBackend=Backend)
+        with mock.patch("host_with_inputs.take_over_ports", return_value=[]) as take:
+            _start_when_needed(server, None, frozenset({"inbox_import"}))
+            b = Backend()
+            b.start()                                                # "initialize": nothing happens yet
+            self.assertEqual(started, [])
+            b.call("inbox_import", {})                               # local tool: still no ports
+            self.assertEqual(started, [])
+            b.call("task_submit", {})                                # now the Host starts, after taking over
+            self.assertEqual(started, [True])
+            take.assert_called_once()
+        self.assertEqual(calls, ["inbox_import", "task_submit"])
