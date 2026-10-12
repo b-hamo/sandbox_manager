@@ -11,6 +11,10 @@ Router (the component that will decide this automatically) is not built yet; unt
 Reply to the user in Korean, briefly.
 
 ## 1. Get the file
+- **Which source? Decide this first.**
+  - The user gave a URL → `inbox_download`.
+  - The user named a file but gave **no URL** (e.g. "tailscale-setup-1.102.4 설치해줘", with or without ".exe") → it is a file they already have. **First list the Downloads folder** (`Get-ChildItem $HOME\Downloads -Name`) and pick the file whose name matches (ignoring the extension). Use exactly that file with `inbox_import`. Do **not** search the web or pick a different package (other architecture, .msi instead of .exe, newer version).
+  - Only if no file in Downloads matches: tell the user and ask for a URL (or whether to download the official installer). Several matches: ask which one.
 - Use the `scrp` tool `inbox_download` (https URLs only). For a .zip pass `extract: true` to unpack it.
 - The file lands in the Host inbox `C:\Users\JH\SecureCUA\codex-work\inbox`, which the Sandbox sees read-only as `C:\Inbox`.
 - **The user already downloaded it** ("다운로드한 X 실행해줘", a file in the Downloads folder): use the `scrp` tool `inbox_import` with the **file name only** (e.g. `{"name": "ZoomIt.zip", "extract": true}`), never a path. It copies the file from Downloads into the same inbox; the original stays. If you are not sure of the exact name, list the Downloads folder with a read-only shell command (`Get-ChildItem $HOME\Downloads -Name`) and ask the user when several files match. Files outside Downloads are refused on purpose: do not try another path.
@@ -30,6 +34,8 @@ Reply to the user in Korean, briefly.
    - If the user only asked to check it ("열리는지만 봐줘", "창이 뜨는지만"), stop when its first window (or license window) appears and say so.
    - **Stop and ask** only for: sign-in, passwords, payment, personal information, or anything that would send the user's data somewhere. Never type such data yourself.
    - UAC prompts inside the Sandbox: press Yes (the Sandbox user is an administrator of the Sandbox only).
+   - **Installers are slow in the Sandbox. Be patient:** while a progress bar or "Preparing…" is shown, keep calling `computer_observe` with `wait_ms: 10000` for **up to 5 minutes**. A bar that stays at the same spot for a while is normal. Do not start a second installer for the same program meanwhile.
+   - **Before saying it failed or is not finished, look once more** (`computer_observe` after 10 s) and check for a finish screen, the program's own window, or its icon on the desktop / Start menu. Report what the screen shows, not a guess.
 8. Say it ran or was installed only after `computer_observe` shows it.
 
 ## 3. Rules

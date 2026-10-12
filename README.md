@@ -95,7 +95,10 @@ watcher.stop(); m.stop(s, "TASK_COMPLETE"); m.cleanup(s)   # cleanup은 받는 �
 ### Sandbox 창은 뒤에서 열림 (2026-10-12)
 
 - `start()`는 창을 열어야 Guest가 로그인하고 Runner가 켜진다(`wsb connect`). 그 창이 약 1초 뒤 맨 앞으로 와서 사용자가 하던 작업이 끊겼다
-- 이제 `connect` 전에 사용자의 맨 앞 창을 기억해 두고, 20초 동안 Sandbox 창이 포커스를 가져가면 **창을 맨 뒤로 보내고 포커스를 사용자 창에 돌려준다**(`sandbox_manager/window.py`, 최대 5번). 끄려면 `SandboxManager(window_behind=False)`
+- 이제 `connect` 전에 사용자의 맨 앞 창을 기억해 두고, Sandbox 창이 스스로 포커스를 가져가면 **창을 맨 뒤로 보내고 포커스를 사용자 창에 돌려준다**(`sandbox_manager/window.py`). 끄려면 `SandboxManager(window_behind=False)`
+- **Sandbox가 켜져 있는 동안 계속** 지켜본다(전에는 처음 20~30초만): 포커스 없이 사용자 창 **위로 다시 올라와도** 뒤로 보낸다(Codex 앱에서 발견: 포커스는 돌아왔는데 0.4초 뒤 창만 다시 올라와 화면을 가림)
+- **사용자가 직접 Sandbox 창을 클릭하거나 작업 표시줄·Alt+Tab으로 고르면 그대로 둔다**(`user_chose()`: 그 창 위에서 마우스 버튼이 실제로 눌렸는지로 판단, 커서만 올려져 있는 건 아님)
+- 시험: Guest 안에서 탐색기·설치 창·Edge·UAC 창을 열어도 Sandbox 창이 앞으로 오지 않음(포커스 0~0.1초)
 - **최소화는 하지 않는다:** 최소화하면 Guest 화면 그리기가 멈춰(실험: 밝은 화면 713 → 60) AI가 화면을 못 본다
 - 실측(JH PC, 실제 Host·Runner `mcp_e2e.py` 3회): Sandbox가 포커스를 가진 시간 약 0.1초(전에는 끝날 때까지 약 14초), 화면 보기·클릭·입력 모두 통과
 
@@ -198,7 +201,7 @@ python tools/smoke_real.py <sandbox_runner.exe>
 | **Sandbox에서 확인 후 PC에 남기기** (JH PC 2026-10-11, 같은 Host·Runner·Codex) | **PASS** — Codex에 "다운로드 폴더에 있는 ZoomIt.zip 을 Sandbox에서 실행해서 창이 뜨는지만 확인하고, 압축 푼 ZoomIt 폴더는 PC에 남기고 끝내줘" → `inbox_import` → Sandbox 안 4개 `OK` → `ZoomIt64.exe` 라이선스 창 확인 → `inbox_finish(keep)` → `session_stop`. `Downloads\ZoomIt`에 4개 파일·인터넷 표시(ZoneId=3), 받는 폴더 비어 있음, 남은 Sandbox 없음. 따로: 받는 폴더 안 exe는 PC 실행 거부, 다운로드 폴더로 남긴 사본은 실행됨·거부 권한 없음(whoami 사본으로 확인) |
 | **다운로드 폴더에 받아 둔 파일을 Sandbox에서 실행** (JH PC 2026-10-10, 같은 Host·Runner·Codex) | **PASS** — Codex에 "다운로드 폴더에 있는 ZoomIt.zip 을 Sandbox에서 실행해줘" → Codex가 `inbox_import`(이름만, 압축 풀기) → Sandbox 안 `OK`, SHA-256 같음 → Sandbox 안에서 `ZoomIt64.exe` 실행, **라이선스 창까지 확인**. 다운로드 폴더 원본 그대로, Codex의 Host 명령은 Skill 읽기 1번뿐, Host에 ZoomIt 프로세스 없음 |
 | **받는 폴더로 받아 Sandbox에서 실행** (JH PC 2026-10-08, host_control develop `7aa6f84` + Runner `0c25213`, Host 무수정, Codex `0.162.0-alpha.2`) | **PASS** — Codex에 "ZoomIt.zip 받아서 실행해줘" → `inbox_download`로 받기·압축 풀기 → Sandbox 안 `OK`, SHA-256 원본과 같음 → Sandbox 안에서 실행, **ZoomIt 라이선스 창까지 확인**(기능은 안 봄). Codex의 Host 명령 0번, Host에 ZoomIt 실행 흔적 없음. 받는 폴더 파일은 Host에서 실행 거부(Access is denied), Sandbox는 복사 후 실행 가능, Sandbox는 그 폴더에 못 씀. reset 뒤 다시 연결은 자동 시험으로만 확인 |
-| 자동 시험 (2026-10-12) | 116개 중 115개 통과·1개 건너뜀(symlink 권한) (Sandbox 창 뒤로 3개 추가) |
+| 자동 시험 (2026-10-12) | 117개 중 116개 통과·1개 건너뜀(symlink 권한) (Sandbox 창 뒤로 4개 추가) |
 | 자동 시험 (2026-10-11) | 113개 중 112개 통과·1개 건너뜀(symlink 권한) (세션 끝 유지/삭제 8개 추가) |
 | 자동 시험 (2026-10-10) | 105개 중 104개 통과·1개 건너뜀(symlink 권한) (`import_to_inbox` 15개 추가) |
 | 자동 시험 (2026-10-08) | 90개 중 89개 통과·1개 건너뜀(symlink 권한) (받는 폴더 8개, 지킴이 실제 PowerShell 1개 포함) |
