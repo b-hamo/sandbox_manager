@@ -40,7 +40,11 @@ TOOL = {
                     "visible read-only inside the Sandbox as C:\\Inbox, and a few seconds after the download each "
                     "file is copied to the Sandbox desktop folder Input and checked (Desktop\\input-check.html). "
                     "Nothing is run on this computer. With extract=true a .zip is unpacked into a folder of the "
-                    "same name. Only public https addresses; at most 50 MiB."),
+                    "same name. Only public https addresses; at most 50 MiB. "
+                    "USE ONLY WHEN THE USER GAVE A URL. If the user only named a file or program (no URL), it is a "
+                    "file they already have: list the Downloads folder and use inbox_import with that file instead; "
+                    "do not search the web or pick another package (.msi instead of .exe, other architecture). "
+                    "If a similar file is already in Downloads, the user is asked on screen first."),
     "inputSchema": {
         "type": "object", "additionalProperties": False, "required": ["url"],
         "properties": {
@@ -185,8 +189,10 @@ FINISH_TOOL = {
                     "Downloads folder (marked as downloaded from the internet, so Windows asks before running "
                     "them), then delete everything in the inbox. keep=[] (the default) keeps nothing. Use the "
                     "names exactly as inbox_download / inbox_import reported them; a folder name (e.g. an "
-                    "unpacked zip) keeps the whole folder. Call it only when the user said what to keep, before "
-                    "session_stop. If you never call it, the inbox is emptied anyway when the session ends."),
+                    "unpacked zip) keeps the whole folder. CALL IT ONLY WHEN THE USER ASKED IN THE CHAT TO KEEP A "
+                    "FILE (\"남겨줘\"); never keep files on your own, not even after a failed install, and never tell "
+                    "the user to install or run a file on this PC. Keeping anything asks the user on screen first. "
+                    "If you never call it, the inbox is emptied anyway when the session ends."),
     "inputSchema": {
         "type": "object", "additionalProperties": False,
         "properties": {
@@ -198,6 +204,26 @@ FINISH_TOOL = {
     "annotations": {"title": "Keep chosen inbox files in Downloads, delete the rest", "readOnlyHint": False,
                     "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
 }
+
+
+def similar_files(folder: Path, url: str) -> list[str]:
+    """Files directly in `folder` that look like the one at `url` (same name, or one name starts the other:
+    "tailscale-setup-1.102.4.exe" vs "tailscale-setup-1.102.4-amd64.msi")."""
+    want = PureWindowsPath(urllib.parse.unquote(urllib.parse.urlsplit(url).path)).stem.lower()
+    if len(want) < 6:
+        return []
+    found = []
+    try:
+        entries = list(Path(folder).iterdir())
+    except OSError:
+        return []
+    for p in entries:
+        if not p.is_file():
+            continue
+        have = p.stem.lower()
+        if len(have) >= 6 and (have == want or want.startswith(have) or have.startswith(want)):
+            found.append(p.name)
+    return sorted(found)[:5]
 
 
 def finish(keep: list, inbox: Path, dest: Path | None = None) -> dict:
