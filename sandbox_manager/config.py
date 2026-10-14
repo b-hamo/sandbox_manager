@@ -1,7 +1,8 @@
 """.wsb configuration and the Guest start script.
 
 Rules (CLAUDE.md "절대 하지 않는 것"):
-- every mapped folder is read-only; there is no parameter to make one writable
+- every mapped folder is read-only, except the per-session shared folder (build_wsb(shared=...),
+  배주한 요청 2026-10-15): a new folder where nothing runs on the Host, see shared.py
 - only folders inside this session's own workspace can be mapped (no user folders, browser
   profiles, Safe Results, or Host output)
 - nothing inside a mapped folder may lead elsewhere on the Host: no junction, symlink or other
@@ -37,6 +38,25 @@ INPUT_WATCH_SCRIPT = "input_watch.ps1"
 # the Host (the folder carries a deny-execute ACE: tools/setup_inbox.ps1).
 GUEST_INBOX = r"C:\Inbox"
 INBOX_FILES_MAX = 200
+# Optional per-session shared folder (prepare(shared=...), shared.py): mapped WRITABLE. Nothing in it can run
+# (deny-execute ACE, which the Guest sees too), so the Guest works in Desktop\Shared and SHARED_MIRROR_PS1
+# copies that into C:\Shared every few seconds. Copy only, never delete: what the Agent saved straight
+# into C:\Shared stays. At session end the Host scans it and copies it to Downloads (shared.finish_shared).
+GUEST_SHARED = r"C:\Shared"
+SHARED_MIRROR_SCRIPT = "shared_mirror.ps1"
+SHARED_FILE_MAX = 500 * 1024 * 1024        # per file (a portable app's biggest file), larger ones are not copied
+SHARED_TOTAL_MAX = 2 * 1024 * 1024 * 1024  # per session; above it nothing is exported
+SHARED_FILES_MAX = 20000
+SHARED_MIRROR_PS1 = r"""$mutex = New-Object System.Threading.Mutex($false, 'Global\SecureCuaSharedMirror')
+if (-not $mutex.WaitOne(0)) { exit 0 }
+$src = Join-Path $env:USERPROFILE 'Desktop\Shared'
+New-Item -ItemType Directory -Force $src | Out-Null
+while ($true) {
+  # /E copies sub-folders, /XJ skips junctions, a file still being written is retried next round.
+  & robocopy.exe $src 'C:\Shared' /E /XJ /R:0 /W:0 /MAX:%(max)d /NP /NFL /NDL /NJH /NJS | Out-Null
+  Start-Sleep -Seconds 3
+}
+""" % {"max": SHARED_FILE_MAX}
 
 # Started by START_PS1 when there is a manifest; runs for the life of the Sandbox (one instance: mutex).
 # The manifest is read again every second because files can be added while the Sandbox runs.
@@ -121,10 +141,11 @@ READY_WAIT_S = 120
 # administrator, no prompt: tools/cert_trust_probe.py) and starts the Runner.
 # The log stays inside the Guest and disappears with it; nothing is written back to the Host.
 START_PS1 = r"""$log = Join-Path $env:USERPROFILE 'Desktop\runner-start.log'
-$watch = 'C:\RunnerPackage\input_watch.ps1'
-if (Test-Path $watch) {
-  Start-Process -FilePath powershell.exe -WindowStyle Hidden `
-    -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$watch
+foreach ($watch in 'C:\RunnerPackage\input_watch.ps1', 'C:\RunnerPackage\shared_mirror.ps1') {
+  if (Test-Path $watch) {
+    Start-Process -FilePath powershell.exe -WindowStyle Hidden `
+      -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$watch
+  }
 }
 $marker = 'C:\RunnerBootstrap\bootstrap.ready'
 $t0 = Get-Date
@@ -216,8 +237,10 @@ def check_ipv4(value: str) -> str:
     return str(ipaddress.IPv4Address(value))   # raises ValueError on anything but a plain IPv4 literal
 
 
-def build_wsb(mappings: list[Mapping], command: str, workspace: Path, inbox: Mapping | None = None) -> str:
-    """inbox: the one folder allowed outside the workspace (checked by inbox.check_inbox_root), read-only too."""
+def build_wsb(mappings: list[Mapping], command: str, workspace: Path, inbox: Mapping | None = None,
+              shared: Mapping | None = None) -> str:
+    """inbox: a folder outside the workspace (checked by inbox.check_inbox_root), read-only too.
+    shared: the per-session shared folder (shared.make_share), the only writable mapping."""
     for m in mappings:
         if not _inside(m.host, workspace):
             raise SandboxManagerError(INVALID_ARGUMENT, f"refusing to map a folder outside the session workspace: {m.host}")
@@ -232,13 +255,21 @@ def build_wsb(mappings: list[Mapping], command: str, workspace: Path, inbox: Map
         if _inside(inbox.host, workspace) or _inside(workspace, inbox.host):
             raise SandboxManagerError(INVALID_ARGUMENT, f"inbox must be separate from the session workspace: {inbox.host}")
         check_contents(inbox.host)
+    if shared is not None:
+        if not shared.host.is_dir():
+            raise SandboxManagerError(INVALID_ARGUMENT, f"shared folder does not exist: {shared.host}")
+        if _inside(shared.host, workspace) or _inside(workspace, shared.host):
+            raise SandboxManagerError(INVALID_ARGUMENT, f"shared folder must be separate from the workspace: {shared.host}")
+        if inbox is not None and (_inside(shared.host, inbox.host) or _inside(inbox.host, shared.host)):
+            raise SandboxManagerError(INVALID_ARGUMENT, f"shared folder must be separate from the inbox: {shared.host}")
+        check_contents(shared.host)
     folders = "".join(
         "<MappedFolder>"
         f"<HostFolder>{escape(str(m.host.resolve()))}</HostFolder>"
         f"<SandboxFolder>{escape(m.guest)}</SandboxFolder>"
-        "<ReadOnly>true</ReadOnly>"
+        f"<ReadOnly>{'false' if m is shared else 'true'}</ReadOnly>"
         "</MappedFolder>"
-        for m in mappings + ([inbox] if inbox is not None else []))
+        for m in mappings + [x for x in (inbox, shared) if x is not None])
     return (
         "<Configuration>"
         "<Networking>Default</Networking>"

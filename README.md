@@ -131,6 +131,24 @@ clear_inbox(inbox)                     # 기본값: 전부 삭제 (받는 폴더
 - 옮기지 않고 **복사**한다: 옮기면 받는 폴더의 "실행 금지" 권한이 따라가서 PC에서 실행이 안 된다(실제 확인). 복사본에는 **인터넷에서 받은 파일 표시**(Zone.Identifier, ZoneId=3)를 붙여 PC에서 실행할 때 Windows가 한 번 더 묻게 한다. 같은 이름은 `이름-2`, 다운로드 폴더에 똑같은 파일이 이미 있으면(`inbox_import`로 가져온 원본) 그대로 둔다
 - 시연용 Host(`host_with_inputs.py`): Agent 도구 `inbox_finish(keep)`, Host가 세션을 끝낼 때(`cleanup`) 받는 폴더를 비움, 새 Host가 켜질 때 지난 세션이 남긴 파일도 비움(Codex 창을 갑자기 닫은 경우)
 
+### 세션 공유 폴더: Sandbox에서 만든 파일을 내 PC에도 (선택, 2026-10-15)
+
+```python
+from sandbox_manager import SharedWatcher, finish_shared, make_share
+
+share = make_share(r"C:\Users\me\SecureCUA\codex-work\shared", session_id)  # 세션마다 새 빈 폴더
+s = sm.prepare(..., shared=share)          # Sandbox 안 C:\Shared 로 쓰기 가능하게 연결
+SharedWatcher(sm, s).start()               # 1초마다 링크가 생기면 지움
+# ... 세션 ...
+r = finish_shared(share)                   # 끝: 검사 → 깨끗하면 Downloads\SandboxShared\<세션>으로 복사
+```
+
+- **포터블 프로그램·PDF 같은 파일용.** 서비스·드라이버를 까는 설치형(Tailscale 등)은 파일만 와서 PC에서 동작하지 않는다
+- Sandbox 안에서는 바탕화면 `Shared`에 저장·압축 해제한다. Guest의 `shared_mirror.ps1`이 3초마다 `C:\Shared`로 복사(지우지는 않음, 링크 건너뜀, 500 MiB 넘는 파일 제외)
+- PC 쪽 폴더에서는 **실행 금지**(`setup_inbox.ps1`이 건 deny-execute가 상속). `make_share`가 whoami 복사본으로 실제로 막히는지 확인하고, 안 막히면 거부. 실험(10/15): Guest는 이 폴더에 링크를 못 만들고, ACL을 바꿔도 PC 쪽엔 반영 안 됨. 실행 금지는 Guest에서도 걸려서 Guest는 자기 바탕화면 쪽에서 실행한다
+- 끝날 때 `finish_shared`: 링크 제거 → 크기(2 GiB, 2만 개) → **Microsoft Defender 검사** → 깨끗하면 새 파일로 복사(인터넷 표시 붙임) 후 공유 폴더 삭제. 위협(BLOCKED)·검사 오류(QUARANTINED)·너무 큼(BLOCKED)이면 실행 금지 상태 그대로 남김
+- 실제 확인(10/15): Guest가 저장한 exe·PDF가 6초 안에 PC에 보임, PC에서 실행 거부, Guest에서는 실행됨, 끝나고 Downloads로 복사·실행됨
+
 ### Host가 살아 있을 때 복구 (언제 할지는 Host가 정함)
 
 ```python
@@ -233,7 +251,7 @@ python tools/smoke_real.py <sandbox_runner.exe>
 
 ## 지켜야 할 규칙 (코드가 막는 것)
 
-- 매핑은 이 세션 작업 폴더 안의 폴더만, 항상 읽기 전용. 쓰기 가능 매핑을 만드는 옵션이 없다. 예외는 `inbox=`로 지정한 받는 폴더 하나(역시 읽기 전용, 사용자 폴더·OneDrive 거부, 링크는 계속 지움)
+- 매핑은 이 세션 작업 폴더 안의 폴더만, 항상 읽기 전용. 예외 둘: `inbox=` 받는 폴더(역시 읽기 전용), 그리고 **`shared=` 세션 공유 폴더 하나만 쓰기 가능**(2026-10-15, 아래). 둘 다 사용자 폴더·OneDrive 거부, 링크는 계속 지움
 - 작업 폴더가 OneDrive 안이면 거부 (살아 있는 token이 동기화되지 않게)
 - Host 인증서에 개인 키가 섞여 오면 거부
 - LogonCommand는 고정 문자열. 주소는 파일로 전달하고 Host·Guest 양쪽에서 IPv4인지 검사
