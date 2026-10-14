@@ -85,6 +85,37 @@ class Share(unittest.TestCase):
             (share / "x.exe").unlink()
             share.rmdir()
 
+    def test_the_person_chooses_keep_delete_or_hold(self):
+        seen = []
+        for choice, status in (("keep", "EXPORTED"), ("delete", "DELETED"), ("hold", "HELD"), ("?", "HELD")):
+            share = self.share_with({"note.pdf": b"%PDF"})
+            r = finish_shared(share, dest=self.dest, scan=clean,
+                              decide=lambda res, c=choice: seen.append(res) or c)
+            self.assertEqual(r["status"], status)
+            self.assertEqual(share.exists(), status == "HELD")
+            self.assertEqual(self.dest.exists() and any(self.dest.iterdir()), status == "EXPORTED")
+            if share.exists():
+                (share / "note.pdf").unlink()
+                share.rmdir()
+            if self.dest.exists():
+                import shutil
+                shutil.rmtree(self.dest)
+        self.assertEqual(seen[0]["status"], "CLEAN")
+        self.assertEqual(seen[0]["files"][0]["name"], "note.pdf")
+        self.assertIn("sha256", seen[0]["files"][0])
+
+    def test_a_failing_decide_holds(self):
+        share = self.share_with({"a.txt": b"a"})
+        r = finish_shared(share, dest=self.dest, scan=clean, decide=lambda _r: 1 / 0)
+        self.assertEqual(r["status"], "HELD")
+        self.assertTrue((share / "a.txt").is_file())
+
+    def test_not_clean_is_never_offered(self):
+        share = self.share_with({"x.exe": b"MZ"})
+        r = finish_shared(share, dest=self.dest, scan=lambda _f: ("threat", "x"),
+                          decide=lambda _r: self.fail("asked"))
+        self.assertEqual(r["status"], "BLOCKED")
+
     def test_too_big_is_not_scanned_nor_exported(self):
         share = self.share_with({"a.bin": b"x" * 10})
         with mock.patch.object(config, "SHARED_TOTAL_MAX", 5):
