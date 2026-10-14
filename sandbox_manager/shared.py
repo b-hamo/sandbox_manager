@@ -18,7 +18,8 @@ This is the one writable mapping, an exception to "no writable Host output mappi
   and config.SHARED_MIRROR_PS1 copies it into C:\\Shared; the Host side never runs anything from it
 - every second the Host deletes any link or hard-linked file that appears anyway (sweep_share)
 - at session end nothing is trusted as it is: links are removed, the size is checked, Microsoft
-  Defender scans the folder, and only a clean folder is COPIED (new files, Downloads' own permissions,
+  Defender scans the folder, the person chooses keep / delete / hold (finish_shared(decide=)), and only a
+  clean folder they keep is COPIED (new files, Downloads' own permissions,
   marked as from the internet so Windows asks before running them) to Downloads\\SandboxShared\\<session>;
   then the share is deleted. A threat, a scan error or Defender missing leaves the files where they are,
   still not runnable (QUARANTINED / BLOCKED, like an Artifact)
@@ -150,10 +151,18 @@ def defender_scan(folder: Path) -> tuple[str, str]:
     return "error", f"MpCmdRun exit {r.returncode}: {tail}"
 
 
-def finish_shared(share, dest=None, scan=defender_scan) -> dict:
-    """Session end. Clean -> copied to dest\\<session> and the share deleted; otherwise left in place.
+KEEP, DELETE, HOLD = "keep", "delete", "hold"
 
-    Returns {"status": EXPORTED | EMPTY | BLOCKED | QUARANTINED, "share", "dest", "files", "scan", "events"}.
+
+def finish_shared(share, dest=None, scan=defender_scan, decide=None) -> dict:
+    """Session end. Only a clean folder is offered; decide(result) -> KEEP | DELETE | HOLD says what then
+    (배주한 결정 2026-10-15: the Host asks the person; no answer = HOLD). Without decide: KEEP.
+
+    KEEP   -> copied to dest\\<session>, the share deleted              status EXPORTED
+    DELETE -> the share deleted                                         status DELETED
+    HOLD   -> left as it is, where nothing runs (the person decides later) status HELD
+    Not clean: left in place, status BLOCKED or QUARANTINED. Nothing in it: removed, status EMPTY.
+    Returns {"status", "share", "dest", "files", "scan", "events"}.
     """
     share = Path(share)
     if not share.is_dir():
@@ -177,6 +186,15 @@ def finish_shared(share, dest=None, scan=defender_scan) -> dict:
         return result | {"status": "QUARANTINED"}
     for f in files:
         f["sha256"] = sha256_file(share / f["name"])
+    try:
+        choice = decide(result | {"status": "CLEAN"}) if decide is not None else KEEP
+    except Exception:  # noqa: BLE001 - no clear answer: nothing is copied or deleted
+        choice = HOLD
+    if choice == DELETE:
+        _remove(share)
+        return result | {"status": "DELETED"}
+    if choice != KEEP:
+        return result | {"status": "HELD"}
     base = Path(dest) if dest is not None else downloads_folder() / DEST_FOLDER
     base.mkdir(parents=True, exist_ok=True)
     target = unique_path(base, share.name)
