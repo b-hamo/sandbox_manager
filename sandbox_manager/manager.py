@@ -56,6 +56,7 @@ from .errors import (INVALID_ARGUMENT, RUNTIME_START_FAILED, RUNTIME_UNAVAILABLE
                                     SandboxManagerError)
 from .firewall import FIX_COMMAND, FirewallCheck
 from .inbox import InboxScanner, _within, check_inbox_root
+from .shared import sweep_share
 from .inputs import InputFile, check_file, sha256_of
 from .network import HostNetwork
 from .process import process_started
@@ -125,6 +126,9 @@ class SandboxSession:
     # files, as listed by scan_inbox(): [{"name", "size", "sha256", "from": "inbox", "registered_at"}].
     inbox: str | None = None
     inbox_files: list = field(default_factory=list)
+    # The per-session shared folder (prepare(shared=...), shared.make_share), mapped writable at
+    # config.GUEST_SHARED. Not removed by cleanup(): the Host calls shared.finish_shared() for it.
+    shared: str | None = None
     timings: dict = field(default_factory=dict)
     events: list = field(default_factory=list)
 
@@ -292,11 +296,15 @@ class SandboxManager:
 
     # ------------------------------------------------------------------ lifecycle
     def prepare(self, session_id: str, runtime_id: str, generation: int, runner_exe: Path, *,
-                input_files: list | None = None, inbox: Path | str | None = None) -> SandboxSession:
+                input_files: list | None = None, inbox: Path | str | None = None,
+                shared: Path | str | None = None) -> SandboxSession:
         """Create the session workspace with the Runner package. Starts nothing.
 
         inbox: a fixed Host folder the Agent downloads into, mapped read-only and live at
         config.GUEST_INBOX (see inbox.py; the Host runs an inbox.InboxWatcher for the session).
+
+        shared: this session's new shared folder from shared.make_share(), mapped writable at
+        config.GUEST_SHARED; the Guest mirrors its Desktop\\Shared into it (see shared.py).
 
         input_files: user files the task needs, each an inputs.InputFile (register_input: size and
         SHA-256 recorded when the Host approved it) or a plain path (hashed now). Each is COPIED into
@@ -318,9 +326,16 @@ class SandboxManager:
         inbox_root = check_inbox_root(inbox) if inbox is not None else None
         if inbox_root is not None and (_within(self.root, inbox_root) or _within(inbox_root, self.root)):
             raise SandboxManagerError(INVALID_ARGUMENT, f"inbox must be separate from the workspace: {inbox_root}")
+        shared_root = check_inbox_root(shared) if shared is not None else None
+        if shared_root is not None:
+            if _within(self.root, shared_root) or _within(shared_root, self.root):
+                raise SandboxManagerError(INVALID_ARGUMENT, f"shared folder must be separate from the workspace: {shared_root}")
+            if inbox_root is not None and (_within(shared_root, inbox_root) or _within(inbox_root, shared_root)):
+                raise SandboxManagerError(INVALID_ARGUMENT, f"shared folder must be separate from the inbox: {shared_root}")
 
         with self._lock_for(session_id):
-            return self._prepare_locked(session_id, runtime_id, generation, runner_exe, sources, inbox_root)
+            return self._prepare_locked(session_id, runtime_id, generation, runner_exe, sources, inbox_root,
+                                        shared_root)
 
     @staticmethod
     def _check_inputs(files: list) -> list[tuple[Path, InputFile | None]]:
@@ -339,12 +354,14 @@ class SandboxManager:
         return sources
 
     def _prepare_locked(self, session_id: str, runtime_id: str, generation: int, runner_exe: Path,
-                        sources: list[tuple[Path, InputFile | None]], inbox_root: Path | None = None) -> SandboxSession:
+                        sources: list[tuple[Path, InputFile | None]], inbox_root: Path | None = None,
+                        shared_root: Path | None = None) -> SandboxSession:
         directory = self.root / "sessions" / session_id
         if directory.exists():
             raise SandboxManagerError(INVALID_ARGUMENT, f"session {session_id} already exists")
         s = SandboxSession(session_id, runtime_id, generation, directory, owner=self._me(),
-                           inbox=str(inbox_root) if inbox_root else None)
+                           inbox=str(inbox_root) if inbox_root else None,
+                           shared=str(shared_root) if shared_root else None)
         s.package_dir.mkdir(parents=True)
         s.bootstrap_dir.mkdir()
         self._t0[session_id] = self.clock()
@@ -366,7 +383,9 @@ class SandboxManager:
             self._write_manifest(s)
             if s.inbox:
                 self._inbox_scanners[session_id] = InboxScanner(Path(s.inbox), self.clock)
-        self._event(s, "PREPARED", runner_sha256=s.runner_sha256, inbox=s.inbox)
+        if s.shared:
+            (s.package_dir / config.SHARED_MIRROR_SCRIPT).write_text(config.SHARED_MIRROR_PS1, encoding="utf-8-sig")
+        self._event(s, "PREPARED", runner_sha256=s.runner_sha256, inbox=s.inbox, shared=s.shared)
         return s
 
     def _write_manifest(self, s: SandboxSession) -> None:
@@ -388,6 +407,16 @@ class SandboxManager:
         if changed:
             s.inbox_files = [{k: v for k, v in e.items() if k != "mtime_ns"} for e in scanner.listed.values()]
             self._write_manifest(s)
+        for kind, fields in events:
+            self._event(s, kind, **fields)
+        return events
+
+    @_locked
+    def sweep_shared(self, s: SandboxSession) -> list[tuple[str, dict]]:
+        """One look at the shared folder (SharedWatcher, every second): delete any link that appeared."""
+        if not s.shared or s.state not in LIVE_STATES + (PREPARED,):
+            return []
+        events = sweep_share(s.shared)
         for kind, fields in events:
             self._event(s, kind, **fields)
         return events
@@ -432,7 +461,8 @@ class SandboxManager:
         if s.input_files:
             mappings.append(config.Mapping(s.input_dir, config.GUEST_INPUT))
         inbox = config.Mapping(Path(s.inbox), config.GUEST_INBOX) if s.inbox else None
-        xml = config.build_wsb(mappings, config.logon_command(), workspace=s.dir, inbox=inbox)
+        shared = config.Mapping(Path(s.shared), config.GUEST_SHARED) if s.shared else None
+        xml = config.build_wsb(mappings, config.logon_command(), workspace=s.dir, inbox=inbox, shared=shared)
         s.wsb_path.write_text(xml, encoding="utf-8")        # no secrets in it; kept until cleanup for audit
         self._state(s, STARTING)
         try:

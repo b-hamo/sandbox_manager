@@ -2,9 +2,11 @@
 from .errors import SandboxManagerError
 from .importer import clear_inbox, finish_inbox, import_to_inbox
 from .inputs import InputFile, register_input
+from .shared import SharedWatcher, finish_shared, make_share
 from .manager import (FAILED, PREPARED, RESTARTING, RUNNING, STARTED, STARTING, TERMINATED, TERMINATION_REASONS,
                                      SandboxManager, SandboxSession)
 
 __all__ = ["SandboxManager", "SandboxSession", "SandboxManagerError", "TERMINATION_REASONS",
            "InputFile", "register_input", "import_to_inbox", "finish_inbox", "clear_inbox",
+           "make_share", "finish_shared", "SharedWatcher",
            "PREPARED", "STARTING", "STARTED", "RUNNING", "RESTARTING", "TERMINATED", "FAILED"]
