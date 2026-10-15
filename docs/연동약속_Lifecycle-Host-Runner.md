@@ -12,6 +12,21 @@
 
 ---
 
+## 2026-10-15 추가: 화면 창 종료 감지 (#46)
+
+Manager `start()`가 Sandbox ID별 창 감시를 시작한다. Host는 별도 호출 없이
+`window_state(s)`를 주기적으로 읽을 수 있다(캐시된 상태를 읽는 비차단 API).
+`OPEN`은 최소화·숨김을 포함한다. 최초 창 미관찰은 `UNSEEN`, 조회 실패는 `UNKNOWN`이며
+종료로 취급하지 않는다. 관찰된 창이 사라지면 `MISSING`, 5초 이상 연속 부재면 `CLOSED`다.
+그 사이 대체 창이 나타나면 `OPEN`으로 돌아간다. 감시가 없으면 `UNAVAILABLE`이다.
+
+Host 연결(b-hamo/host_control#78): `MISSING`이면 복구 보류, `CLOSED`이면 사용자 종료로 처리한다.
+Runner가 준비됐다면 `TERMINATE(USER_STOP)`을 보내고, 응답 실패 여부와 관계없이 소유한 VM에
+`stop(s, USER_STOP)` → 종료 확인 → `cleanup(s)` → 기존 Shared 검사·보존 선택을 진행한다.
+감시 결과를 별도 Guest 메시지로 전달하지 않으며 Runner의 프로토콜 변경은 없다.
+`stop/reset`은 이전 감시를 중지하고 reset의 새 VM은 새 감시를 시작한다.
+Shared에 이미 복사된 파일만 기존 반출 대상이며 전체 설치 상태를 보존하지 않는다.
+
 ## 1. 합의된 것
 
 | # | 내용 | 결정 | 담당 |

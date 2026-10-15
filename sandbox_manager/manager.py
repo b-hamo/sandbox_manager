@@ -202,6 +202,7 @@ class SandboxManager:
         self._locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
         self._inbox_scanners: dict[str, InboxScanner] = {}
+        self._window_monitors: dict[str, object] = {}
 
     def _lock_for(self, session_id: str) -> threading.RLock:
         with self._locks_guard:
@@ -469,6 +470,10 @@ class SandboxManager:
             s.sandbox_id = self.wsb.start(xml)
             self._mark(s, "sandbox_started")
             self._event(s, "SANDBOX_STARTED", sandbox_id=s.sandbox_id)
+            # Observe before connect so a quick user close during startup is not missed.
+            watch = getattr(self.wsb, "watch_window", None)
+            if watch is not None:
+                self._window_monitors[s.session_id] = watch(s.sandbox_id, log=self.log)
             user_window = window.foreground() if self.window_behind else None
             self.wsb.connect(s.sandbox_id)                   # LogonCommand waits for the window (PoC)
             if user_window:
@@ -556,6 +561,15 @@ class SandboxManager:
     def is_running(self, s: SandboxSession) -> bool:
         return bool(s.sandbox_id) and s.sandbox_id in self.wsb.running()
 
+    def window_state(self, s: SandboxSession) -> str:
+        """UNSEEN/OPEN/MISSING/CLOSED/UNKNOWN; UNAVAILABLE for a backend without window observation.
+
+        Nonblocking: Host may poll while start/recovery holds the session lock.
+        MISSING is a close grace period; defer recovery until it resolves.
+        """
+        monitor = self._window_monitors.get(s.session_id)
+        return monitor.state if monitor is not None else "UNAVAILABLE"
+
     @_locked
     def stop(self, s: SandboxSession, reason: str, *, emergency: bool = False) -> SandboxSession:
         """Stop and confirm on the Host. The Host sends TERMINATE first unless it is an emergency;
@@ -574,6 +588,9 @@ class SandboxManager:
 
     def _stop_sandbox(self, s: SandboxSession) -> None:
         """Remove what the Guest could still read, stop the Sandbox, return only once `wsb list` drops it."""
+        monitor = self._window_monitors.pop(s.session_id, None)
+        if monitor is not None:
+            monitor.stop()
         s.ready_path.unlink(missing_ok=True)
         s.bootstrap_path.unlink(missing_ok=True)
         if not s.sandbox_id:
@@ -593,6 +610,8 @@ class SandboxManager:
 
     # ------------------------------------------------------------------ recovery (Host decides when)
     def _begin_recovery(self, s: SandboxSession, generation: int, *states: str) -> None:
+        if self.window_state(s) in ("MISSING", "CLOSED"):
+            raise SandboxManagerError(RUNTIME_UNAVAILABLE, "Sandbox window is closing; recovery refused")
         self._need(s, *states)
         if not isinstance(generation, int) or isinstance(generation, bool) or generation <= s.generation:
             raise SandboxManagerError(INVALID_ARGUMENT,
