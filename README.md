@@ -50,6 +50,7 @@ Skill을 복사해야 들어간다.
    args = ['C:/Users/<나>/Documents/host_control/host/mcp_server.py',
            '--runner-exe', 'C:/Users/<나>/Documents/sandbox_runner/build/sandbox_runner.exe',
            '--inbox', 'C:/Users/<나>/SecureCUA/codex-work/inbox',
+           '--save-downloads',
            '--shared', 'C:/Users/<나>/SecureCUA/codex-work/shared',
            '--agent-guard']
    default_tools_approval_mode = "approve"
@@ -59,6 +60,7 @@ Skill을 복사해야 들어간다.
    | 옵션 | 켜지는 것 |
    |---|---|
    | `--inbox` | 다운로드 폴더 파일·인터넷 파일을 Sandbox로 넣기, 끝날 때 받는 폴더 비우기 |
+   | `--save-downloads` | 인터넷에서 받은 파일을 다운로드 폴더에도 저장(브라우저처럼), 끝나도 남김 |
    | `--shared` | Sandbox 바탕화면 `Shared` → 이 PC(실행 금지) → 끝날 때 검사 후 확인 창(예 남기기·아니요 지우기·무응답 보관) |
    | `--agent-guard` | AI가 혼자 Sandbox를 끝내거나 비슷한 파일을 또 받을 때 확인 창 |
 6. **확인:** 코덱스를 완전히 껐다 켜고 `codex mcp list`에서 `scrp`가 `enabled`인지 본다. 새 대화에서 "7-Zip 포터블 받아서 Sandbox에서 실행해 보고 내 PC에도 남겨줘"
