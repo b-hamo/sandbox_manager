@@ -312,6 +312,37 @@ python tools/smoke_real.py <sandbox_runner.exe>
 - `wsb list`에서 사라진 것을 못 보면 TERMINATED로 기록하지 않는다
 - Guest 안 명령 실행(`wsb exec`)은 고정 문자열 `restart_command()` 하나뿐. 바깥에서 명령을 넘길 방법이 없다(Generic RPC 금지)
 
+## Sandbox 화면 창 닫기와 세션 종료
+
+`wsb connect`로 열린 화면을 닫아도 Windows Sandbox VM은 계속 실행될 수 있다.
+`SandboxManager.start()`는 해당 Sandbox ID의 클라이언트 창을 별도로 감시한다.
+Host는 `window_state(session)`을 읽고 `CLOSED`일 때 `USER_STOP` 종료 흐름을 수행한다
+(연계: b-hamo/host_control#78, 이 저장소 #46). 이 API 자체는 VM을 종료하거나 파일을 반출하지 않는다.
+
+- `UNSEEN`: 아직 창을 관찰하지 못함. 시작 실패/시간 초과 처리는 기존 Host 정책이 담당한다.
+- `OPEN`: 관찰한 창이 존재함. 최소화·숨김도 여기에 포함한다.
+- `MISSING`: 관찰한 창이 사라졌으나 5초 유예 중. 이 동안 Runner/VM 복구를 보류한다.
+- `CLOSED`: 유예 동안 창이 돌아오지 않음. 해당 VM 감시의 확정 결과다.
+- `UNKNOWN`: 창/프로세스 조회 실패. 부재 시간을 초기화하며 종료로 판정하지 않는다.
+- `UNAVAILABLE`: 감시 기능 없는 backend 또는 감시 정리 후.
+
+WindowsSandboxRemoteSession.exe / WindowsSandboxClient.exe의 정확한 `--id` 인자로 세션을
+연결한다. PID·생성 시각·창 핸들을 함께 확인하므로 다른 Sandbox 창과 PID 재사용을 구분한다.
+창이 존재하는 동안에는 Win32 조회만 하고, 최초 발견 및 창 소멸 후 재발견 때에만
+Windows PowerShell/CIM으로 클라이언트를 찾는다. `--id`를 노출하지 않는 다른 클라이언트는
+추측해서 종료하지 않는다. 감시는 창 뒤로 보내기 설정과 독립적이다.
+
+`stop()`은 감시를 중지하고 `wsb list`로 VM 종료를 확인한다. VM reset에는 새 감시를 만들고,
+Runner만 재시작할 때에는 같은 감시를 유지한다. 기존에 실행 중인 세션에 소급 적용되지 않는다.
+Shared 파일 보존은 Host의 `--shared` 설정과 기존 검사·보존 선택에 따른다.
+Program Files/시스템 DLL/레지스트리 등 설치 상태 전체를 보존하는 기능은 아니다.
+
+검증: `python -m unittest discover -s tests -v`.
+`test_window_session.py`는 창 교체, 조회 실패, PID 재사용, Manager stop/reset 외에 실제
+Windows HWND의 최소화·숨김·복원·파괴를 검사한다. 실제 사용자 Sandbox를 종료하지 않는다.
+PowerShell 7에서 Windows PowerShell 자식의 모듈 탐색이 깨진 경우 테스트 실행 전에
+`$env:PSModulePath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules"`로 지정한다.
+
 ## 남은 것
 
 - Host 연결 고리: 이준원이 `mcp_server`에서 부르기로 함(`task_submit` 때 켜기). 인증서 SAN·재생성·1일 버그도 이준원이 수정 예정

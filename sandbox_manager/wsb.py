@@ -97,6 +97,10 @@ class WsbCli:
         subprocess.Popen([self.exe, "connect", "--id", sandbox_id],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    def watch_window(self, sandbox_id: str, *, log=None):
+        from .window_session import WindowSession
+        return WindowSession(sandbox_id, log=log).start()
+
     def stop(self, sandbox_id: str) -> None:
         self._run("stop", "--id", sandbox_id, timeout=60)
 
