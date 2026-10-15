@@ -11,10 +11,12 @@ Router (the component that will decide this automatically) is not built yet; unt
 Reply to the user in Korean, briefly.
 
 ## 1. Get the file
+- **Never download inside the Sandbox** (배주한 결정 2026-10-15). No Edge/browser download, no Win+R or PowerShell download command in the Sandbox. **Every file reaches the Sandbox from this PC**: this PC downloads it (`inbox_download`) or copies it from Downloads (`inbox_import`), and the Sandbox runs the copy that appears in its desktop `Input` folder. If `inbox_download` fails, report the error and stop; do not fall back to a download inside the Sandbox.
 - **Which source? Decide this first.**
   - The user gave a URL → `inbox_download`.
-  - The user named a file but gave **no URL** (e.g. "tailscale-setup-1.102.4 설치해줘", with or without ".exe") → it is a file they already have. **First list the Downloads folder** (`Get-ChildItem $HOME\Downloads -Name`) and pick the file whose name matches (ignoring the extension). Use exactly that file with `inbox_import`. Do **not** search the web or pick a different package (other architecture, .msi instead of .exe, newer version).
-  - Only if no file in Downloads matches: tell the user and ask for a URL (or whether to download the official installer). Several matches: ask which one.
+  - The user named a program or file but gave **no URL** ("7-Zip 받아서 설치해줘", "tailscale-setup-1.102.4 설치해줘"):
+    1. **First list the Downloads folder** (`Get-ChildItem $HOME\Downloads -Name`). If a file matches the name (ignoring the extension), use exactly that file with `inbox_import`; do not download it again or pick a different package (other architecture, .msi instead of .exe, newer version). Several matches: ask which one.
+    2. **Nothing matches:** find the **official** download yourself on this PC (the vendor's own site; a web search is fine) and call `inbox_download` with the direct URL of the Windows installer (64-bit, latest stable unless the user named a version), e.g. `https://www.7-zip.org/a/7z2604-x64.exe`. Do not ask the user for the URL; tell them which URL you used. Ask only if you cannot tell which site is official.
 - Use the `scrp` tool `inbox_download` (https URLs only). For a .zip pass `extract: true` to unpack it.
 - The file lands in the Host inbox `%USERPROFILE%\SecureCUA\codex-work\inbox` (the folder given to the Host as `--inbox`), which the Sandbox sees read-only as `C:\Inbox`.
 - **If the result has `downloads_copy`** (Host option `--save-downloads`, 배주한 결정 2026-10-15): the file is also saved in the user's Downloads folder, like a browser download, and **stays there after the session**. Tell the user its name ("다운로드 폴더에도 저장했어요: 7z2604-x64.exe"). You do not need `inbox_finish` to keep a downloaded file then.
@@ -29,7 +31,7 @@ Reply to the user in Korean, briefly.
    - If the line is not there yet, wait 5 s and press F5; repeat up to 12 times (about 1 minute).
    - If it is still missing or says `FAIL`, do not run the file; report it. Never re-download it inside the Sandbox instead.
 5. Open things by **double-clicking desktop icons** (the `Input` folder opens in Explorer) or use `computer_hotkey` with `keys: ["win", "r"]` to open the Run dialog inside the Sandbox. This requires host_control policy `POL-0.1.1` or later; after updating the Host, start a new session. The Sandbox has no Notepad, so `.txt` files do not open. If an older Host returns `POLICY_DENIED`, report that the Host needs updating; do not work around the denial.
-6. Run the program by double-clicking it in the `Input` folder (GUI actions through scrp only).
+6. Run the program by double-clicking **the copy in the `Input` folder** (the file this PC downloaded; GUI actions through scrp only). Never run a different copy you fetched yourself.
 7. **Inside the Sandbox, finish the job without asking** (배주한 결정 2026-10-12: the Sandbox is thrown away afterwards, so nothing there touches this PC):
    - If the user asked to install or run it ("설치해줘", "실행해줘", "깔아줘"), go all the way: tick the license agreement, press Next / Install / Finish, accept default options, and launch the program. Do not stop to ask. The user asking for the install counts as their agreement to the license.
    - If the user only asked to check it ("열리는지만 봐줘", "창이 뜨는지만"), stop when its first window (or license window) appears and say so.
