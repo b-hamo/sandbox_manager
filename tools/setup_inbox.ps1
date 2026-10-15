@@ -4,7 +4,8 @@
 #   powershell -ExecutionPolicy Bypass -File tools\setup_inbox.ps1 [-Work <folder>]
 #
 # <Work> (default %USERPROFILE%\SecureCUA\codex-work) is the Agent's whole writable folder; <Work>\inbox is
-# the part mapped into the Sandbox. On every file created anywhere under <Work>:
+# the part mapped into the Sandbox (read-only, Host --inbox) and <Work>\shared the root of the per-session
+# shared folders (Host --shared, 2026-10-15). On every file created anywhere under <Work>:
 #   Everyone: DENY execute            -> the Host refuses to run it ("Access is denied"); the Guest only
 #                                        reads it, copies it and runs its own copy
 #   OWNER RIGHTS: read, write, delete -> whoever creates a file does not get to change its permissions
@@ -12,13 +13,23 @@
 param([string]$Work = (Join-Path $env:USERPROFILE 'SecureCUA\codex-work'))
 $ErrorActionPreference = 'Stop'
 $inbox = Join-Path $Work 'inbox'
+$shared = Join-Path $Work 'shared'
 New-Item -ItemType Directory -Force $inbox | Out-Null
+New-Item -ItemType Directory -Force $shared | Out-Null
 foreach ($name in 'Documents','Desktop','Downloads','OneDrive','AppData') {
   $user = Join-Path $env:USERPROFILE $name
   if ($Work.TrimEnd('\').StartsWith($user, [StringComparison]::OrdinalIgnoreCase)) { throw "refusing a folder inside $user" }
 }
-& icacls $Work /deny '*S-1-1-0:(OI)(IO)(X)' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "icacls deny failed ($LASTEXITCODE)" }
+# Safe to run again (another PC, or after an update): the deny is added only when it is not there yet.
+$hasDeny = @((Get-Acl $Work).Access | Where-Object {
+  $_.AccessControlType -eq 'Deny' -and -not $_.IsInherited -and
+  $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' -and
+  ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::ExecuteFile)
+}).Count -gt 0
+if (-not $hasDeny) {
+  & icacls $Work /deny '*S-1-1-0:(OI)(IO)(X)' | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "icacls deny failed ($LASTEXITCODE)" }
+}
 & icacls $Work /grant '*S-1-3-4:(OI)(CI)(R,W,D)' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "icacls grant failed ($LASTEXITCODE)" }
 
@@ -29,4 +40,4 @@ $blocked = $false
 try { & $probe | Out-Null } catch { $blocked = $true }
 Remove-Item $probe -Force
 if (-not $blocked) { throw "a program in $inbox still runs on the Host; the deny-execute ACE did not apply" }
-"OK: $Work is writable, nothing under it runs on the Host; $inbox is the folder to map"
+"OK: $Work is writable, nothing under it runs on the Host; --inbox $inbox  --shared $shared"

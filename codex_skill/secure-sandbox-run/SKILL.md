@@ -16,7 +16,7 @@ Reply to the user in Korean, briefly.
   - The user named a file but gave **no URL** (e.g. "tailscale-setup-1.102.4 설치해줘", with or without ".exe") → it is a file they already have. **First list the Downloads folder** (`Get-ChildItem $HOME\Downloads -Name`) and pick the file whose name matches (ignoring the extension). Use exactly that file with `inbox_import`. Do **not** search the web or pick a different package (other architecture, .msi instead of .exe, newer version).
   - Only if no file in Downloads matches: tell the user and ask for a URL (or whether to download the official installer). Several matches: ask which one.
 - Use the `scrp` tool `inbox_download` (https URLs only). For a .zip pass `extract: true` to unpack it.
-- The file lands in the Host inbox `C:\Users\JH\SecureCUA\codex-work\inbox`, which the Sandbox sees read-only as `C:\Inbox`.
+- The file lands in the Host inbox `%USERPROFILE%\SecureCUA\codex-work\inbox` (the folder given to the Host as `--inbox`), which the Sandbox sees read-only as `C:\Inbox`.
 - **The user already downloaded it** ("다운로드한 X 실행해줘", a file in the Downloads folder): use the `scrp` tool `inbox_import` with the **file name only** (e.g. `{"name": "ZoomIt.zip", "extract": true}`), never a path. It copies the file from Downloads into the same inbox; the original stays. If you are not sure of the exact name, list the Downloads folder with a read-only shell command (`Get-ChildItem $HOME\Downloads -Name`) and ask the user when several files match. Files outside Downloads are refused on purpose: do not try another path.
 - Do not download with shell commands (curl, Invoke-WebRequest, ...). Do not run, install, move or copy the downloaded file on this PC.
 

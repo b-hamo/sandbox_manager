@@ -16,6 +16,53 @@ from sandbox_manager import SandboxManager, SandboxManagerError
 ```
 호출 시점·순서는 `docs/연동약속_Lifecycle-Host-Runner.md` 2절(Sandbox는 `task_submit` 때 켠다).
 
+## 다른 PC에서 코덱스로 쓰기: 처음 설치 (2026-10-15)
+
+**GitHub 코드만 받아서는 코덱스에 적용되지 않는다.** 코덱스는 PC마다 `~/.codex/config.toml`(Host 등록)과 `~/.codex/skills/`(Skill)를
+읽기 때문에, 아래를 PC마다 한 번씩 해야 한다. Host가 막는 것(정책, 확인 창, 실행 금지, 도구 설명에 붙는 규칙)은 Host를 같은 옵션으로
+돌리면 어느 PC에서나 똑같이 적용되고, Skill에만 있는 안내(다운로드 폴더 먼저 보기, 설치 5분 기다리기, `input-check.html` 확인 등)는
+Skill을 복사해야 들어간다.
+
+1. **Windows 준비:** 아래 "실행 전 조건"의 1~3 (Windows Sandbox 켜기, Smart App Control 끄고 재부팅, 관리자 PowerShell로 방화벽 한 번)
+2. **받기·빌드** (저장소 3개를 한 폴더에, 예: `%USERPROFILE%\Documents`)
+   ```powershell
+   git clone https://github.com/b-hamo/host_control.git
+   git clone https://github.com/b-hamo/sandbox_runner.git
+   git clone https://github.com/b-hamo/sandbox_manager.git   # Skill·준비 스크립트용
+   cd host_control; py -3.13 -m venv .venv; .venv\Scripts\python -m pip install -r requirements.txt; cd ..
+   ```
+   Runner는 `sandbox_runner` README대로 MSYS2 UCRT64에서 빌드 → `sandbox_runner\build\sandbox_runner.exe`
+3. **받는 폴더·공유 폴더 준비** (관리자 아님, 다시 돌려도 됨)
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File sandbox_manager\tools\setup_inbox.ps1
+   ```
+   `%USERPROFILE%\SecureCUA\codex-work\inbox`·`\shared`를 만들고, 그 아래에서는 이 PC가 아무것도 실행하지 못하게 한다(마지막 줄 `OK: ...`가 나와야 함)
+4. **Skill 복사**
+   ```powershell
+   New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\skills" | Out-Null
+   Copy-Item -Recurse -Force sandbox_manager\codex_skill\secure-sandbox-run "$env:USERPROFILE\.codex\skills\"
+   ```
+   Skill이 바뀌면(`git pull` 뒤) 다시 복사한다
+5. **코덱스에 Host 등록:** `%USERPROFILE%\.codex\config.toml`에 추가하고 `<나>`를 자기 사용자 이름으로 바꾼다(경로는 `/`로)
+   ```toml
+   [mcp_servers.scrp]
+   command = 'C:/Users/<나>/Documents/host_control/.venv/Scripts/python.exe'
+   args = ['C:/Users/<나>/Documents/host_control/host/mcp_server.py',
+           '--runner-exe', 'C:/Users/<나>/Documents/sandbox_runner/build/sandbox_runner.exe',
+           '--inbox', 'C:/Users/<나>/SecureCUA/codex-work/inbox',
+           '--shared', 'C:/Users/<나>/SecureCUA/codex-work/shared',
+           '--agent-guard']
+   default_tools_approval_mode = "approve"
+   startup_timeout_sec = 60
+   tool_timeout_sec = 120
+   ```
+   | 옵션 | 켜지는 것 |
+   |---|---|
+   | `--inbox` | 다운로드 폴더 파일·인터넷 파일을 Sandbox로 넣기, 끝날 때 받는 폴더 비우기 |
+   | `--shared` | Sandbox 바탕화면 `Shared` → 이 PC(실행 금지) → 끝날 때 검사 후 확인 창(예 남기기·아니요 지우기·무응답 보관) |
+   | `--agent-guard` | AI가 혼자 Sandbox를 끝내거나 비슷한 파일을 또 받을 때 확인 창 |
+6. **확인:** 코덱스를 완전히 껐다 켜고 `codex mcp list`에서 `scrp`가 `enabled`인지 본다. 새 대화에서 "7-Zip 포터블 받아서 Sandbox에서 실행해 보고 내 PC에도 남겨줘"
+
 ### Sandbox 안에서 Win+R 사용
 
 Sandbox Manager의 `.wsb`와 Guest 시작 스크립트는 Win+R을 비활성화하지 않는다. 기존 `POLICY_DENIED`는 `host_control/host/policy.py`의 입력 정책에서 발생했다. Win+R을 허용하는 Host 정책 `POL-0.1.1` 이상으로 업데이트하고 새 세션을 시작하면, READY 뒤 `computer_observe`를 거쳐 `computer_hotkey(keys=["win", "r"])`로 Sandbox 안 실행 창을 열 수 있다. Sandbox Manager만 업데이트하면 기존 Host의 차단은 해제되지 않는다. 아래 2026-09-29 시험 표의 Win+R 거부는 변경 전 정책의 기록이다.
