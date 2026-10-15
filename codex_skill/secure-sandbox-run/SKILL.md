@@ -37,9 +37,13 @@ Reply to the user in Korean, briefly.
    - **Installers are slow in the Sandbox. Be patient:** while a progress bar or "Preparing…" is shown, keep calling `computer_observe` with `wait_ms: 10000` for **up to 5 minutes**. A bar that stays at the same spot for a while is normal. Do not start a second installer for the same program meanwhile.
    - **Before saying it failed or is not finished, look once more** (`computer_observe` after 10 s) and check for a finish screen, the program's own window, or its icon on the desktop / Start menu. Report what the screen shows, not a guess.
 8. Say it ran or was installed only after `computer_observe` shows it.
-9. **Keeping something on this PC too (shared folder, when `task_submit`'s description mentions `Desktop\Shared`; 배주한 요청 2026-10-15):** a **portable program** (a zip you unpack, a single exe that needs no installer) or a **file** (PDF, document, result) the user wants on this PC goes in the Sandbox's desktop folder `Shared`: unzip it there, or "Save as" into it. It still runs there as usual. The Host sees a copy within seconds (where it cannot run). When the session ends the Host scans it and asks the person at this PC: Yes = keep (copied to `Downloads\SandboxShared\<session>`), No = delete, no answer = held in `SecureCUA\codex-work\shared\<session>` (not runnable). Tell the user this before `session_stop`; do not decide it for them.
-   - An **installed** program (installer with services or drivers, e.g. Tailscale, VPNs) cannot come along this way. Install it in the Sandbox as above and tell the user it stays in the Sandbox only.
-   - Do not put anything there the user did not want on this PC.
+9. **Always use the shared folder (when `task_submit`'s description mentions `Desktop\Shared`; 배주한 결정 2026-10-15):** the user does not have to ask. By default, put what you install or save in the Sandbox under its desktop folder `Shared` (`C:\Users\WDAGUtilityAccount\Desktop\Shared`):
+   - **Installer with a destination folder** (e.g. 7-Zip, Notepad++, most setup wizards): change the install folder to `Desktop\Shared\<program name>` (e.g. `...\Desktop\Shared\7-Zip`), then install as usual.
+   - **Zip / portable program:** unzip it into `Desktop\Shared\<program name>`.
+   - **Files** (PDF, document, result): "Save as" into `Desktop\Shared`.
+   - It still runs there inside the Sandbox as usual. The Host sees a copy within seconds (where it cannot run). When the session ends the Host scans it and asks the person at this PC: Yes = keep (copied to `Downloads\SandboxShared\<session>`), No = delete, no answer = held in `SecureCUA\codex-work\shared\<session>` (not runnable). Tell the user this when you report the install, and again before `session_stop`; do not decide it for them.
+   - **Cannot come along:** an installer with no folder choice, or one that adds services or drivers (e.g. Tailscale, VPNs, antivirus, printer drivers). Install it normally and tell the user it stays in the Sandbox only. Do not copy `C:\Program Files\...` into `Shared` afterwards.
+   - Only skip `Shared` when the user says it should stay in the Sandbox only ("샌드박스에서만", "내 PC엔 필요 없어").
 
 ## 3. Rules
 - If a tool returns `POLICY_DENIED`, do not work around it; tell the user.

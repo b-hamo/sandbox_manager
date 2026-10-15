@@ -191,7 +191,7 @@ r = finish_shared(share, decide=ask)       # 끝: 검사 → 깨끗하면 ask(r)
 ```
 
 - **포터블 프로그램·PDF 같은 파일용.** 서비스·드라이버를 까는 설치형(Tailscale 등)은 파일만 와서 PC에서 동작하지 않는다
-- Sandbox 안에서는 바탕화면 `Shared`에 저장·압축 해제한다. Guest의 `shared_mirror.ps1`이 3초마다 `C:\Shared`로 복사(지우지는 않음, 링크 건너뜀, 500 MiB 넘는 파일 제외)
+- Sandbox 안에서는 바탕화면 `Shared`에 설치·저장·압축 해제한다. **사용자가 말하지 않아도 기본**(설치 폴더를 `Shared\<프로그램>`으로, 10/15 배주한 결정). 남길지는 끝날 때 확인 창에서. Guest의 `shared_mirror.ps1`이 3초마다 `C:\Shared`로 복사(지우지는 않음, 링크 건너뜀, 500 MiB 넘는 파일 제외)
 - PC 쪽 폴더에서는 **실행 금지**(`setup_inbox.ps1`이 건 deny-execute가 상속). `make_share`가 whoami 복사본으로 실제로 막히는지 확인하고, 안 막히면 거부. 실험(10/15): Guest는 이 폴더에 링크를 못 만들고, ACL을 바꿔도 PC 쪽엔 반영 안 됨. 실행 금지는 Guest에서도 걸려서 Guest는 자기 바탕화면 쪽에서 실행한다
 - 끝날 때 `finish_shared`: 링크 제거 → 크기(2 GiB, 2만 개) → **Microsoft Defender 검사** → 깨끗하면 새 파일로 복사(인터넷 표시 붙임) 후 공유 폴더 삭제. 위협(BLOCKED)·검사 오류(QUARANTINED)·너무 큼(BLOCKED)이면 실행 금지 상태 그대로 남김
 - **남길지 지울지(10/15 배주한 결정):** 깨끗한 것만 `decide`에 물어본다. `keep` → 다운로드로 복사(EXPORTED), `delete` → 삭제(DELETED), `hold`·답 없음·오류 → 공유 폴더에 실행 금지 상태로 보관(HELD). Host는 PC 확인 창으로 묻는다(예=남기기, 아니요=지우기, 취소·45초 무응답=보관). `decide`를 안 주면 남기기
