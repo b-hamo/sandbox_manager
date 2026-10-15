@@ -1,57 +1,68 @@
 ---
 name: "secure-sandbox-run"
-description: "Run, open, install or try any file or program from the internet (or any untrusted file) safely: download it with the scrp inbox_download tool (or, for a file the user already downloaded, copy it with inbox_import) and run it only inside the Secure CUA Windows Sandbox through the scrp MCP tools, never on this PC. Use whenever the user asks to download-and-run, run a file they already downloaded (Downloads folder), open an internet file (exe, zip, pdf, installer, script), test a program, or do anything risky that should not touch this computer. Do not use for ordinary coding or reading local project files."
+description: "Install, run, open or try any program or file from the internet (or any untrusted file) safely: this PC downloads it into the Downloads folder with the scrp inbox_download tool (or copies a file the user already has with inbox_import), the Windows Sandbox runs that copy from its desktop Input folder, and the installed result comes back to this PC through the Sandbox's desktop Shared folder. Use whenever the user asks to download, install, run or test a program (e.g. \"7-Zip 받아서 설치해줘\"), run a file in their Downloads folder, or open an internet file (exe, msi, zip, pdf, installer, script). Never run such files on this PC. Do not use for ordinary coding or reading local project files."
 ---
 
 # Secure Sandbox Run (Secure CUA, S-개발자)
 
-This PC (the Host) is protected. **Nothing is run or installed on this PC. Files come in only through `inbox_download` or `inbox_import`; programs run only inside the Sandbox.**
-Router (the component that will decide this automatically) is not built yet; until then this skill tells you the procedure. The real blocking is done by the Host (tool policy, deny-execute folder, read-only mapping), not by this text.
-
 Reply to the user in Korean, briefly.
 
-## 1. Get the file
-- **Never download inside the Sandbox** (배주한 결정 2026-10-15). No Edge/browser download, no Win+R or PowerShell download command in the Sandbox. **Every file reaches the Sandbox from this PC**: this PC downloads it (`inbox_download`) or copies it from Downloads (`inbox_import`), and the Sandbox runs the copy that appears in its desktop `Input` folder. If `inbox_download` fails, report the error and stop; do not fall back to a download inside the Sandbox.
-- **Which source? Decide this first.**
-  - The user gave a URL → `inbox_download`.
-  - The user named a program or file but gave **no URL** ("7-Zip 받아서 설치해줘", "tailscale-setup-1.102.4 설치해줘"):
-    1. **First list the Downloads folder** (`Get-ChildItem $HOME\Downloads -Name`). If a file matches the name (ignoring the extension), use exactly that file with `inbox_import`; do not download it again or pick a different package (other architecture, .msi instead of .exe, newer version). Several matches: ask which one.
-    2. **Nothing matches:** find the **official** download yourself on this PC (the vendor's own site; a web search is fine) and call `inbox_download` with the direct URL of the Windows installer (64-bit, latest stable unless the user named a version), e.g. `https://www.7-zip.org/a/7z2604-x64.exe`. Do not ask the user for the URL; tell them which URL you used. Ask only if you cannot tell which site is official.
-- Use the `scrp` tool `inbox_download` (https URLs only). For a .zip pass `extract: true` to unpack it.
-- The file lands in the Host inbox `%USERPROFILE%\SecureCUA\codex-work\inbox` (the folder given to the Host as `--inbox`), which the Sandbox sees read-only as `C:\Inbox`.
-- **If the result has `downloads_copy`** (Host option `--save-downloads`, 배주한 결정 2026-10-15): the file is also saved in the user's Downloads folder, like a browser download, and **stays there after the session**. Tell the user its name ("다운로드 폴더에도 저장했어요: 7z2604-x64.exe"). You do not need `inbox_finish` to keep a downloaded file then.
-- **The user already downloaded it** ("다운로드한 X 실행해줘", a file in the Downloads folder): use the `scrp` tool `inbox_import` with the **file name only** (e.g. `{"name": "ZoomIt.zip", "extract": true}`), never a path. It copies the file from Downloads into the same inbox; the original stays. If you are not sure of the exact name, list the Downloads folder with a read-only shell command (`Get-ChildItem $HOME\Downloads -Name`) and ask the user when several files match. Files outside Downloads are refused on purpose: do not try another path.
-- Do not download with shell commands (curl, Invoke-WebRequest, ...). Do not run, install, move or copy the downloaded file on this PC.
+## The flow (배주한 결정 2026-10-15) — always these three steps
 
-## 2. Start the Sandbox and run it there (scrp MCP tools only)
-1. `task_submit` (goal: what the user asked). The Sandbox starts; this may be before or after the download.
-2. Call `computer_observe` with `wait_ms: 10000` until a screenshot comes back. "PREPARING" errors are normal: retry up to 12 times.
-3. Each downloaded file is copied within seconds to the Sandbox desktop folder `Input` and checked. Big files can take 10–30 s.
-4. Before running anything, double-click the desktop icon `input-check.html` (opens in Edge). Confirm the file's line says `OK` and its SHA-256 equals the `inbox_download` / `inbox_import` result; tell the user the size and SHA-256.
-   - If the line is not there yet, wait 5 s and press F5; repeat up to 12 times (about 1 minute).
-   - If it is still missing or says `FAIL`, do not run the file; report it. Never re-download it inside the Sandbox instead.
-5. Open things by **double-clicking desktop icons** (the `Input` folder opens in Explorer) or use `computer_hotkey` with `keys: ["win", "r"]` to open the Run dialog inside the Sandbox. This requires host_control policy `POL-0.1.1` or later; after updating the Host, start a new session. The Sandbox has no Notepad, so `.txt` files do not open. If an older Host returns `POLICY_DENIED`, report that the Host needs updating; do not work around the denial.
-6. Run the program by double-clicking **the copy in the `Input` folder** (the file this PC downloaded; GUI actions through scrp only). Never run a different copy you fetched yourself.
-7. **Inside the Sandbox, finish the job without asking** (배주한 결정 2026-10-12: the Sandbox is thrown away afterwards, so nothing there touches this PC):
-   - If the user asked to install or run it ("설치해줘", "실행해줘", "깔아줘"), go all the way: tick the license agreement, press Next / Install / Finish, accept default options, and launch the program. Do not stop to ask. The user asking for the install counts as their agreement to the license.
-   - If the user only asked to check it ("열리는지만 봐줘", "창이 뜨는지만"), stop when its first window (or license window) appears and say so.
-   - **Stop and ask** only for: sign-in, passwords, payment, personal information, or anything that would send the user's data somewhere. Never type such data yourself.
-   - UAC prompts inside the Sandbox: press Yes (the Sandbox user is an administrator of the Sandbox only).
-   - **Installers are slow in the Sandbox. Be patient:** while a progress bar or "Preparing…" is shown, keep calling `computer_observe` with `wait_ms: 10000` for **up to 5 minutes**. A bar that stays at the same spot for a while is normal. Do not start a second installer for the same program meanwhile.
-   - **Before saying it failed or is not finished, look once more** (`computer_observe` after 10 s) and check for a finish screen, the program's own window, or its icon on the desktop / Start menu. Report what the screen shows, not a guess.
-8. Say it ran or was installed only after `computer_observe` shows it.
-9. **Always use the shared folder (when `task_submit`'s description mentions `Desktop\Shared`; 배주한 결정 2026-10-15):** the user does not have to ask. By default, put what you install or save in the Sandbox under its desktop folder `Shared` (`C:\Users\WDAGUtilityAccount\Desktop\Shared`):
-   - **Installer with a destination folder** (e.g. 7-Zip, Notepad++, most setup wizards): change the install folder to `Desktop\Shared\<program name>` (e.g. `...\Desktop\Shared\7-Zip`), then install as usual.
-   - **Zip / portable program:** unzip it into `Desktop\Shared\<program name>`.
-   - **Files** (PDF, document, result): "Save as" into `Desktop\Shared`.
-   - It still runs there inside the Sandbox as usual. The Host sees a copy within seconds (where it cannot run). When the session ends the Host scans it and asks the person at this PC: Yes = keep (copied to `Downloads\SandboxShared\<session>`), No = delete, no answer = held in `SecureCUA\codex-work\shared\<session>` (not runnable). Tell the user this when you report the install, and again before `session_stop`; do not decide it for them.
-   - **Cannot come along:** an installer with no folder choice, or one that adds services or drivers (e.g. Tailscale, VPNs, antivirus, printer drivers). Install it normally and tell the user it stays in the Sandbox only. Do not copy `C:\Program Files\...` into `Shared` afterwards.
-   - Only skip `Shared` when the user says it should stay in the Sandbox only ("샌드박스에서만", "내 PC엔 필요 없어").
+```
+1. THIS PC downloads the file        → Downloads\7z2604-x64.exe   (stays there after the session)
+2. The Sandbox runs THAT file        → Sandbox desktop Input\7z2604-x64.exe → install
+3. The result comes back to THIS PC  → install into Sandbox desktop Shared\7-Zip
+                                        → this PC sees it, and keeps it after the user says yes at the end
+```
 
-## 3. Rules
-- If a tool returns `POLICY_DENIED`, do not work around it; tell the user.
-- If the Sandbox does not start, do not run the file on this PC instead; report it.
-- If an install fails, **report what you saw and leave the Sandbox open**. Never tell the user to install or run the file on this PC, never keep it in Downloads on your own, never end the Sandbox on your own. (The Host asks the user on screen before keeping files on this PC, before ending the Sandbox, and before downloading a file from the web when a similar one is already in Downloads. If the user says no, you get `POLICY_DENIED`: accept it.)
-- When done, **do not call `session_stop`**. Leave the Sandbox open for the user to look at; call `session_stop` only when the user says "끝내" / "종료해".
-- **Ending: keep or delete the inbox files.** By default everything in the inbox is deleted when the session ends. If the user wants to keep a file to use on this PC ("ZoomIt 남기고 끝내", "설치 파일은 남겨줘"), call `inbox_finish` with `keep` = the names exactly as `inbox_download` / `inbox_import` reported them (a folder name keeps the whole unpacked folder), then `session_stop`. Kept items go to the Downloads folder, marked as from the internet. If the user did not say, ask once ("받은 파일 중 PC에 남길 것이 있나요? 없으면 모두 지웁니다") before `session_stop`; "없어" → `session_stop` only. Skip that question when every received file is already in Downloads (`downloads_copy` from `inbox_download`, or the original of an `inbox_import`): emptying the inbox then deletes nothing the user has. Tell the user where kept files went. Never run a kept file on this PC.
+Example: "7-Zip 받아서 설치해줘" → step 1 `inbox_download https://www.7-zip.org/a/7z2604-x64.exe` → step 2 double-click `Input\7z2604-x64.exe` in the Sandbox → step 3 set the install folder to `C:\Users\WDAGUtilityAccount\Desktop\Shared\7-Zip`, install.
+
+**Never** download anything inside the Sandbox (no Edge/browser download, no Win+R or PowerShell download command there), and **never** run or install the file on this PC. If a step fails, report it and stop; do not take another route.
+
+## Step 1. This PC gets the file (`scrp` tools `inbox_download` / `inbox_import`)
+1. **The user gave a URL** → `inbox_download` with it.
+2. **The user named a program or file without a URL** ("7-Zip 받아서 설치해줘", "tailscale-setup-1.102.4 설치해줘"):
+   - **First list the Downloads folder** (`Get-ChildItem $HOME\Downloads -Name`, read-only). If a file matches the name (ignoring the extension), use exactly that file with `inbox_import` (`{"name": "7z2604-x64.exe"}`, file name only, never a path). Do not download it again or swap it for another package (other architecture, .msi instead of .exe, newer version). Several matches: ask which one.
+   - **Nothing matches:** find the **official** download yourself (the vendor's own site; a web search on this PC is fine) and call `inbox_download` with the direct https URL of the Windows installer (64-bit, latest stable unless the user named a version). Do not ask the user for the URL; tell them which URL you used. Ask only if you cannot tell which site is official.
+   - For a .zip pass `extract: true`.
+3. **Check the result.** `downloads_copy` says where the file is in Downloads (Host option `--save-downloads`): tell the user ("다운로드 폴더에 저장했어요: 7z2604-x64.exe"). It stays there after the session. `sandbox_path` (`Desktop\Input\<name>`) is where the Sandbox will see it.
+- Do not download with shell commands (curl, Invoke-WebRequest, ...) on this PC either. Do not open, run, move or copy the downloaded file on this PC.
+
+## Step 2. The Sandbox runs that file (`scrp` GUI tools only)
+1. `task_submit` (goal: what the user asked). Call it first or right after step 1; the Sandbox takes up to a minute to start.
+2. `computer_observe` with `wait_ms: 10000` until a screenshot comes back. "PREPARING" errors are normal: retry up to 12 times.
+3. Within seconds the file is copied to the Sandbox desktop folder **`Input`** and checked. Double-click the desktop icon `input-check.html` (opens in Edge): its line for the file must say `OK` with the same SHA-256 as step 1. Tell the user the size and SHA-256. Not there yet: wait 5 s, press F5, up to 12 times. Missing or `FAIL`: do not run it; report it.
+4. Open the `Input` folder (double-click the desktop icon, or `computer_hotkey` `["win", "e"]`) and **double-click the file there**. That copy is the only one you may run. Win+R works too (`computer_hotkey` `["win", "r"]`, host policy `POL-0.1.1` or later).
+5. **Finish the job without asking** (배주한 결정 2026-10-12: the Sandbox is thrown away afterwards):
+   - "설치해줘", "실행해줘", "깔아줘" → go all the way: accept the license, Next / Install / Finish, default options except the install folder (step 3), then start the program. The user's request counts as agreement to the license.
+   - "열리는지만 봐줘" → stop at the first window and say so.
+   - **Stop and ask** only for sign-in, passwords, payment, personal information, or anything that sends the user's data somewhere. Never type such data yourself.
+   - UAC prompt inside the Sandbox: press Yes (administrator of the Sandbox only).
+   - **Be patient:** installers are slow in the Sandbox. While a progress bar or "Preparing…" shows, keep calling `computer_observe` with `wait_ms: 10000` for up to 5 minutes. Do not start a second installer meanwhile.
+   - Before saying it failed or is not finished, look once more after 10 s (finish screen, the program's window, its files). Report what the screen shows, not a guess.
+
+## Step 3. The result comes back through `Shared` (when `task_submit`'s description mentions `Desktop\Shared`)
+The user does not have to ask for this. By default everything you install or save goes under the Sandbox desktop folder **`Shared`** = `C:\Users\WDAGUtilityAccount\Desktop\Shared`:
+- **Installer with a destination folder** (7-Zip, Notepad++, most setup wizards): on the "Destination folder" / "Install location" page, replace the path with `C:\Users\WDAGUtilityAccount\Desktop\Shared\<program name>` (e.g. `...\Desktop\Shared\7-Zip`), then install.
+- **Zip / portable program:** unzip into `Desktop\Shared\<program name>`.
+- **Files** (PDF, document, result): "Save as" into `Desktop\Shared`.
+- **Check it:** after installing, open `Desktop\Shared\<program name>` in Explorer and start the program from there (e.g. `7zFM.exe`) with `computer_observe` showing its window. That is the proof it is installed; it will not be in the Start menu or `Program Files`.
+- This PC sees a copy within seconds (`%USERPROFILE%\SecureCUA\codex-work\shared\<session>`, where nothing can run). When the session ends the Host scans it and asks the person at this PC: **Yes** = copied to `Downloads\SandboxShared\<session>` (usable on this PC), **No** = deleted, no answer = held where it is (not runnable). Do not decide this for the user.
+- **Cannot come along:** an installer with no folder choice, or one that adds services or drivers (Tailscale, VPNs, antivirus, printer drivers). Install it normally and say it stays in the Sandbox only. Do not copy `C:\Program Files\...` into `Shared` afterwards.
+- Skip `Shared` only when the user says the Sandbox only ("샌드박스에서만", "내 PC엔 필요 없어").
+
+## Report when done
+Say, in Korean, in a few lines:
+- **Step 1:** source URL (or the Downloads file used) and where it is now: `Downloads\<name>`
+- **Step 2:** the file run in the Sandbox (`Input\<name>`), what the screen showed (finish page, program window)
+- **Step 3:** where it is installed in the Sandbox (`Desktop\Shared\<program>`), that this PC already has a copy, and that saying "끝내" will ask whether to keep it in `Downloads\SandboxShared`
+- Anything you could not check.
+
+## Rules
+- `POLICY_DENIED`: do not work around it; tell the user.
+- Sandbox does not start, download fails, install fails: report what you saw and **leave the Sandbox open**. Never tell the user to install or run the file on this PC instead.
+- **Do not call `session_stop` on your own**, not even after a failure. Call it only when the user says "끝내" / "종료해". The Host asks the person at this PC first, then asks about the `Shared` files.
+- **Files in the inbox at the end:** they are deleted when the session ends. Files from step 1 are already in Downloads (`downloads_copy`, or the original of an `inbox_import`), so nothing the user has is lost; do not ask about them. Only if a received file has no Downloads copy and the user wants it kept, call `inbox_finish` with `keep` = its name before `session_stop`.
 - After `session_stop`, this conversation cannot start a Sandbox again (`SESSION_TERMINATED`): tell the user to open a new conversation.
+- The real protection is the Host (tool policy, deny-execute folders, read-only inbox, scan before anything is kept). This text tells you the procedure.
