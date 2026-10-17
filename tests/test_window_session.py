@@ -82,6 +82,7 @@ class WindowLifetime(unittest.TestCase):
     def test_gone_without_any_visible_client_skips_the_slow_lookup(self):
         # 2026-10-17: the PowerShell lookup took ~1 s and held every close back by that much
         self.monitor._handles, self.monitor._births = {10: 20}, {20: 100}
+        self.monitor._had_main = True                                  # it was on the screen before
         with patch('sandbox_manager.window_session.process_started', return_value=None), \
              patch('sandbox_manager.window_session.any_client_window', return_value=False) as cheap, \
              patch('sandbox_manager.window_session.client_pids') as query:
@@ -89,32 +90,40 @@ class WindowLifetime(unittest.TestCase):
             cheap.assert_called_once_with(visible_only=True)
             query.assert_not_called()
 
-    def test_hidden_helper_windows_do_not_keep_a_closed_window_open(self):
-        # After X the client keeps hidden helper windows for about a second; once the window the user
-        # saw is destroyed, those no longer count as "open".
+    def test_after_x_hidden_windows_alone_are_not_open(self):
+        # Real X clicks (2026-10-17): the client hides its window and may live on with only hidden
+        # windows (helpers, or the hidden main window) for seconds. To the user the Sandbox is closed.
         self.monitor._handles, self.monitor._births = {10: 20, 11: 20}, {20: 100}
-        alive = {10, 11}
-        with patch('sandbox_manager.window_session.process_started', return_value=100), \
-             patch('sandbox_manager.window_session.windows_for_pids', side_effect=lambda pids: {h: 20 for h in alive}), \
-             patch('sandbox_manager.window_session._is_visible', side_effect=lambda h: h == 10), \
-             patch('sandbox_manager.window_session._is_window', side_effect=lambda h: h in alive), \
-             patch('sandbox_manager.window_session.any_client_window', return_value=False), \
-             patch('sandbox_manager.window_session.client_pids') as query:
-            self.assertEqual(self.monitor._windows(), {10})           # the visible one counts
-            alive.discard(10)                                          # X: the visible window is destroyed
-            self.assertEqual(self.monitor._windows(), {})              # helper 11 alone is not "open"
-            query.assert_not_called()
-
-    def test_minimized_or_hidden_main_window_still_counts(self):
-        self.monitor._handles, self.monitor._births = {10: 20}, {20: 100}
         visible = {10}
         with patch('sandbox_manager.window_session.process_started', return_value=100), \
-             patch('sandbox_manager.window_session.windows_for_pids', return_value={10: 20}), \
+             patch('sandbox_manager.window_session.windows_for_pids', return_value={10: 20, 11: 20}), \
              patch('sandbox_manager.window_session._is_visible', side_effect=lambda h: h in visible), \
-             patch('sandbox_manager.window_session._is_window', return_value=True):
-            self.assertEqual(self.monitor._windows(), {10})
-            visible.clear()                                            # hidden, not destroyed
-            self.assertEqual(self.monitor._windows(), {10})
+             patch('sandbox_manager.window_session.any_client_window', return_value=False), \
+             patch('sandbox_manager.window_session.client_pids') as query:
+            self.assertEqual(self.monitor._windows(), {10: 20})        # on the screen
+            visible.clear()                                            # X: hidden, process still there
+            self.assertEqual(self.monitor._windows(), {})
+            query.assert_not_called()
+
+    def test_before_anything_was_visible_a_hidden_window_counts(self):
+        # Startup: the client window exists before it is shown; that is not a close.
+        self.monitor._handles, self.monitor._births = {10: 20}, {20: 100}
+        with patch('sandbox_manager.window_session.process_started', return_value=100), \
+             patch('sandbox_manager.window_session.windows_for_pids', return_value={10: 20}), \
+             patch('sandbox_manager.window_session._is_visible', return_value=False):
+            self.assertEqual(self.monitor._windows(), {10: 20})
+
+    def test_another_visible_client_window_is_looked_up(self):
+        # Our window is gone but a visible Sandbox client window exists: it may be this session's
+        # replacement, so the exact (slower) lookup decides.
+        self.monitor._handles, self.monitor._births, self.monitor._had_main = {10: 20}, {20: 100}, True
+        with patch('sandbox_manager.window_session.process_started', return_value=5), \
+             patch('sandbox_manager.window_session.windows_for_pids', return_value={12: 21}), \
+             patch('sandbox_manager.window_session._is_visible', return_value=True), \
+             patch('sandbox_manager.window_session.any_client_window', return_value=True), \
+             patch('sandbox_manager.window_session.client_pids', return_value={21}) as query:
+            self.assertEqual(self.monitor._windows(), {12: 21})
+            query.assert_called_once()
 
     def test_live_window_uses_cached_identity_without_process_query(self):
         self.monitor._handles, self.monitor._births = {10: 20}, {20: 100}
