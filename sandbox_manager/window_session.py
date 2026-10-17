@@ -1,0 +1,199 @@
+"""Observe only the client windows belonging to one `wsb --id` session.
+
+Closing the remote-session window disconnects its UI; it need not stop the VM.
+This module reports that intent. The Host owns termination and shared-file decisions.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import re
+import subprocess
+import sys
+import threading
+import time
+import uuid
+
+from . import window
+from .process import process_started
+
+# 배주한 요청 2026-10-17: the keep/delete question should appear about 1.5 s after the user closes the window
+# (was 5 s grace + 0.5 s polling). Closing destroys the client window; a window that only moves, hides or
+# minimizes stays listed, so a short grace is enough to ride out a replacement window.
+GRACE_S = 1.0
+POLL_S = 0.2
+
+CLIENTS = {"windowssandboxremotesession.exe", "windowssandboxclient.exe"}
+
+
+def session_pids(rows, sandbox_id):
+    """Match an exact --id argument, never a title or a process-name substring."""
+    pattern = re.compile(r'(?:^|\s)--id(?:\s+|=)"?' + re.escape(sandbox_id) + r'"?(?=\s|$)', re.I)
+    return {int(row["ProcessId"]) for row in rows
+            if str(row.get("Name", "")).lower() in CLIENTS
+            and pattern.search(row.get("CommandLine") or "")}
+
+
+def client_pids(sandbox_id):
+    script = ("$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); "
+              "@(Get-CimInstance Win32_Process -Filter "
+              "\"Name='WindowsSandboxRemoteSession.exe' OR Name='WindowsSandboxClient.exe'\" "
+              "| Select-Object Name,ProcessId,CommandLine) | ConvertTo-Json -Compress")
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                            capture_output=True, timeout=5, check=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+    rows = json.loads(result.stdout.decode("utf-8-sig") or "[]")
+    return session_pids(rows if isinstance(rows, list) else [rows], sandbox_id)
+
+
+def windows_for_pids(pids):
+    """Include hidden/minimized top-level windows: visibility is not lifetime."""
+    ctypes, wintypes, u32, _ = window._api()
+    found = {}
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def visit(hwnd, _):
+        pid = wintypes.DWORD()
+        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value in pids:
+            found[int(hwnd)] = pid.value
+        return True
+
+    if not u32.EnumWindows(callback_type(visit), 0):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return found
+
+
+
+def _is_visible(hwnd) -> bool:
+    ctypes, wintypes, u32, _ = window._api()
+    return bool(u32.IsWindowVisible(wintypes.HWND(hwnd)))
+
+
+def any_client_window(visible_only=False):
+    """True when any top-level window belongs to a Sandbox client process (by image name; fast, no PowerShell)."""
+    ctypes, wintypes, u32, k32 = window._api()
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                               ctypes.POINTER(wintypes.DWORD)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    names, found = {}, []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def image(pid):
+        if pid not in names:
+            name = ""
+            h = k32.OpenProcess(0x1000, False, pid)                  # PROCESS_QUERY_LIMITED_INFORMATION
+            if h:
+                buf, size = ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
+                if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    name = buf.value.rsplit("\\", 1)[-1].lower()
+                k32.CloseHandle(h)
+            names[pid] = name
+        return names[pid]
+
+    def visit(hwnd, _):
+        if visible_only and not u32.IsWindowVisible(hwnd):
+            return True
+        pid = wintypes.DWORD()
+        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if image(pid.value) in CLIENTS:
+            found.append(hwnd)
+            return False                                             # one is enough
+        return True
+
+    u32.EnumWindows(callback_type(visit), 0)
+    return bool(found)
+
+
+class WindowSession:
+    """A cancellable observer. MISSING is a grace period, CLOSED is sticky.
+
+    Errors reset the absence timer. Never seeing a window is UNSEEN, not a close.
+    Cached HWND/PID pairs keep normal polling cheap; after destruction rediscover
+    the session's client to allow a replacement window within the grace period.
+    """
+    def __init__(self, sandbox_id, *, snapshot=None, clock=time.monotonic, grace_s=GRACE_S, poll_s=POLL_S, log=None):
+        self.sandbox_id = str(uuid.UUID(sandbox_id))
+        self._snapshot = snapshot or self._windows
+        self._clock, self._grace_s, self._poll_s = clock, grace_s, poll_s
+        self._log = log or (lambda message: None)
+        self._handles = {}
+        self._births = {}
+        self._had_main = False                   # a window of this session was visible at least once
+        self._seen, self._missing_at = False, None
+        self.state = "UNSEEN"
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _windows(self):
+        """What counts as "open": a window of this session's client that is visible on the screen.
+
+        A minimized window still counts (Windows keeps it visible). Once a window was seen visible,
+        hidden-only windows do not count (2026-10-17, real X clicks): after X the client hides its
+        window and may live on with only hidden windows for seconds, or keep hidden helper windows for
+        about a second; to the user the Sandbox is closed. Before anything was visible, any window counts.
+        """
+        if self._handles:
+            live_pids = {pid for pid, birth in self._births.items()
+                         if birth is not None and process_started(pid) == birth}
+            current = windows_for_pids(live_pids) if live_pids else {}
+            visible = {h: p for h, p in current.items() if _is_visible(h)}
+            if visible:
+                self._had_main = True
+                self._handles = current
+                return visible
+            if not self._had_main and any(current.get(hwnd) == pid for hwnd, pid in self._handles.items()):
+                self._handles = current                    # nothing seen visible yet: any window counts
+                return current
+            # Nothing visible. The command-line lookup (client_pids) starts PowerShell and takes about a
+            # second, so ask it only when some visible Sandbox client window exists that could be ours.
+            if self._had_main and not any_client_window(visible_only=True):
+                return {}
+        self._handles = windows_for_pids(client_pids(self.sandbox_id))
+        self._births = {pid: process_started(pid) for pid in set(self._handles.values())}
+        visible = {h: p for h, p in self._handles.items() if _is_visible(h)}
+        if visible:
+            self._had_main = True
+            return visible
+        return {} if self._had_main else self._handles
+
+    def sample(self):
+        if self.state == "CLOSED":
+            return self.state
+        try:
+            present = bool(self._snapshot())
+        except Exception as exc:
+            if self.state != "UNKNOWN":
+                self._log(f"Sandbox window query failed; not treating it as a close: {exc}")
+            self._missing_at, self.state = None, "UNKNOWN"
+            return self.state
+        if present:
+            self._seen, self._missing_at, self.state = True, None, "OPEN"
+        elif self._seen:
+            now = self._clock()
+            if self._missing_at is None:
+                self._missing_at = now
+            self.state = "CLOSED" if now - self._missing_at >= self._grace_s else "MISSING"
+        else:
+            self.state = "UNSEEN"
+        return self.state
+
+    def start(self):
+        def run():
+            while not self._stop.is_set():
+                if self.sample() == "CLOSED":
+                    self._log(f"Sandbox client window closed: {self.sandbox_id}")
+                    return
+                self._stop.wait(self._poll_s)
+        if sys.platform == "win32":
+            self._thread = threading.Thread(target=run, name="sandbox-window-session", daemon=True)
+            self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=6)
