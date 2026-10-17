@@ -65,10 +65,6 @@ def windows_for_pids(pids):
     return found
 
 
-def _is_window(hwnd) -> bool:
-    ctypes, wintypes, u32, _ = window._api()
-    return bool(u32.IsWindow(wintypes.HWND(hwnd)))
-
 
 def _is_visible(hwnd) -> bool:
     ctypes, wintypes, u32, _ = window._api()
@@ -126,46 +122,43 @@ class WindowSession:
         self._log = log or (lambda message: None)
         self._handles = {}
         self._births = {}
-        self._main = set()                       # windows of this session seen visible at least once
-        self._had_main = False
+        self._had_main = False                   # a window of this session was visible at least once
         self._seen, self._missing_at = False, None
         self.state = "UNSEEN"
         self._stop = threading.Event()
         self._thread = None
 
     def _windows(self):
-        """What counts as "open": a window of this session's client the user could see.
+        """What counts as "open": a window of this session's client that is visible on the screen.
 
-        2026-10-17 (keep/delete question about 1.5 s after X): after X the client's hidden helper
-        windows live on for about a second, so they no longer count once a window was seen visible.
-        A window that was visible keeps counting while it exists (minimized or hidden is not closed).
+        A minimized window still counts (Windows keeps it visible). Once a window was seen visible,
+        hidden-only windows do not count (2026-10-17, real X clicks): after X the client hides its
+        window and may live on with only hidden windows for seconds, or keep hidden helper windows for
+        about a second; to the user the Sandbox is closed. Before anything was visible, any window counts.
         """
         if self._handles:
             live_pids = {pid for pid, birth in self._births.items()
                          if birth is not None and process_started(pid) == birth}
             current = windows_for_pids(live_pids) if live_pids else {}
-            self._remember_visible(current)
-            self._main = {h for h in self._main if _is_window(h)}
-            if self._main:
+            visible = {h: p for h, p in current.items() if _is_visible(h)}
+            if visible:
+                self._had_main = True
                 self._handles = current
-                return self._main
+                return visible
             if not self._had_main and any(current.get(hwnd) == pid for hwnd, pid in self._handles.items()):
                 self._handles = current                    # nothing seen visible yet: any window counts
                 return current
-            # Gone. The command-line lookup (client_pids) starts PowerShell and takes about a second, so
-            # ask it only when some visible Sandbox client window exists that could be a replacement.
-            if not any_client_window(visible_only=True):
+            # Nothing visible. The command-line lookup (client_pids) starts PowerShell and takes about a
+            # second, so ask it only when some visible Sandbox client window exists that could be ours.
+            if self._had_main and not any_client_window(visible_only=True):
                 return {}
         self._handles = windows_for_pids(client_pids(self.sandbox_id))
         self._births = {pid: process_started(pid) for pid in set(self._handles.values())}
-        self._remember_visible(self._handles)
-        return self._main if self._had_main else self._handles
-
-    def _remember_visible(self, handles):
-        visible = {h for h in handles if _is_visible(h)}
+        visible = {h: p for h, p in self._handles.items() if _is_visible(h)}
         if visible:
-            self._main |= visible
             self._had_main = True
+            return visible
+        return {} if self._had_main else self._handles
 
     def sample(self):
         if self.state == "CLOSED":
