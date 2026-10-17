@@ -17,6 +17,12 @@ import uuid
 from . import window
 from .process import process_started
 
+# 배주한 요청 2026-10-17: the keep/delete question should appear about 1.5 s after the user closes the window
+# (was 5 s grace + 0.5 s polling). Closing destroys the client window; a window that only moves, hides or
+# minimizes stays listed, so a short grace is enough to ride out a replacement window.
+GRACE_S = 1.0
+POLL_S = 0.2
+
 CLIENTS = {"windowssandboxremotesession.exe", "windowssandboxclient.exe"}
 
 
@@ -59,6 +65,53 @@ def windows_for_pids(pids):
     return found
 
 
+def _is_window(hwnd) -> bool:
+    ctypes, wintypes, u32, _ = window._api()
+    return bool(u32.IsWindow(wintypes.HWND(hwnd)))
+
+
+def _is_visible(hwnd) -> bool:
+    ctypes, wintypes, u32, _ = window._api()
+    return bool(u32.IsWindowVisible(wintypes.HWND(hwnd)))
+
+
+def any_client_window(visible_only=False):
+    """True when any top-level window belongs to a Sandbox client process (by image name; fast, no PowerShell)."""
+    ctypes, wintypes, u32, k32 = window._api()
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                               ctypes.POINTER(wintypes.DWORD)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    names, found = {}, []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def image(pid):
+        if pid not in names:
+            name = ""
+            h = k32.OpenProcess(0x1000, False, pid)                  # PROCESS_QUERY_LIMITED_INFORMATION
+            if h:
+                buf, size = ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
+                if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    name = buf.value.rsplit("\\", 1)[-1].lower()
+                k32.CloseHandle(h)
+            names[pid] = name
+        return names[pid]
+
+    def visit(hwnd, _):
+        if visible_only and not u32.IsWindowVisible(hwnd):
+            return True
+        pid = wintypes.DWORD()
+        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if image(pid.value) in CLIENTS:
+            found.append(hwnd)
+            return False                                             # one is enough
+        return True
+
+    u32.EnumWindows(callback_type(visit), 0)
+    return bool(found)
+
+
 class WindowSession:
     """A cancellable observer. MISSING is a grace period, CLOSED is sticky.
 
@@ -66,29 +119,53 @@ class WindowSession:
     Cached HWND/PID pairs keep normal polling cheap; after destruction rediscover
     the session's client to allow a replacement window within the grace period.
     """
-    def __init__(self, sandbox_id, *, snapshot=None, clock=time.monotonic, grace_s=5.0, poll_s=0.5, log=None):
+    def __init__(self, sandbox_id, *, snapshot=None, clock=time.monotonic, grace_s=GRACE_S, poll_s=POLL_S, log=None):
         self.sandbox_id = str(uuid.UUID(sandbox_id))
         self._snapshot = snapshot or self._windows
         self._clock, self._grace_s, self._poll_s = clock, grace_s, poll_s
         self._log = log or (lambda message: None)
         self._handles = {}
         self._births = {}
+        self._main = set()                       # windows of this session seen visible at least once
+        self._had_main = False
         self._seen, self._missing_at = False, None
         self.state = "UNSEEN"
         self._stop = threading.Event()
         self._thread = None
 
     def _windows(self):
+        """What counts as "open": a window of this session's client the user could see.
+
+        2026-10-17 (keep/delete question about 1.5 s after X): after X the client's hidden helper
+        windows live on for about a second, so they no longer count once a window was seen visible.
+        A window that was visible keeps counting while it exists (minimized or hidden is not closed).
+        """
         if self._handles:
             live_pids = {pid for pid, birth in self._births.items()
                          if birth is not None and process_started(pid) == birth}
-            current = windows_for_pids(live_pids)
-            if any(current.get(hwnd) == pid for hwnd, pid in self._handles.items()):
+            current = windows_for_pids(live_pids) if live_pids else {}
+            self._remember_visible(current)
+            self._main = {h for h in self._main if _is_window(h)}
+            if self._main:
                 self._handles = current
+                return self._main
+            if not self._had_main and any(current.get(hwnd) == pid for hwnd, pid in self._handles.items()):
+                self._handles = current                    # nothing seen visible yet: any window counts
                 return current
+            # Gone. The command-line lookup (client_pids) starts PowerShell and takes about a second, so
+            # ask it only when some visible Sandbox client window exists that could be a replacement.
+            if not any_client_window(visible_only=True):
+                return {}
         self._handles = windows_for_pids(client_pids(self.sandbox_id))
         self._births = {pid: process_started(pid) for pid in set(self._handles.values())}
-        return self._handles
+        self._remember_visible(self._handles)
+        return self._main if self._had_main else self._handles
+
+    def _remember_visible(self, handles):
+        visible = {h for h in handles if _is_visible(h)}
+        if visible:
+            self._main |= visible
+            self._had_main = True
 
     def sample(self):
         if self.state == "CLOSED":

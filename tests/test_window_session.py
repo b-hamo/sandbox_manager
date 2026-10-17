@@ -63,7 +63,8 @@ class WindowLifetime(unittest.TestCase):
 
     def test_reused_handle_with_different_pid_is_rediscovered(self):
         self.monitor._handles = {10: 20}
-        with patch('sandbox_manager.window_session.windows_for_pids', side_effect=[{10: 99}, {}]), \
+        with patch('sandbox_manager.window_session.windows_for_pids', return_value={}), \
+             patch('sandbox_manager.window_session.any_client_window', return_value=True), \
              patch('sandbox_manager.window_session.client_pids', return_value=set()) as query:
             self.assertEqual(self.monitor._windows(), {})
             query.assert_called_once_with(SBX)
@@ -72,10 +73,48 @@ class WindowLifetime(unittest.TestCase):
         self.monitor._handles, self.monitor._births = {10: 20}, {20: 100}
         with patch('sandbox_manager.window_session.process_started', return_value=200), \
              patch('sandbox_manager.window_session.windows_for_pids', return_value={}) as windows, \
+             patch('sandbox_manager.window_session.any_client_window', return_value=True), \
              patch('sandbox_manager.window_session.client_pids', return_value=set()) as query:
             self.assertEqual(self.monitor._windows(), {})
             self.assertEqual(windows.call_args_list[0].args, (set(),))
             query.assert_called_once_with(SBX)
+
+    def test_gone_without_any_visible_client_skips_the_slow_lookup(self):
+        # 2026-10-17: the PowerShell lookup took ~1 s and held every close back by that much
+        self.monitor._handles, self.monitor._births = {10: 20}, {20: 100}
+        with patch('sandbox_manager.window_session.process_started', return_value=None), \
+             patch('sandbox_manager.window_session.any_client_window', return_value=False) as cheap, \
+             patch('sandbox_manager.window_session.client_pids') as query:
+            self.assertEqual(self.monitor._windows(), {})
+            cheap.assert_called_once_with(visible_only=True)
+            query.assert_not_called()
+
+    def test_hidden_helper_windows_do_not_keep_a_closed_window_open(self):
+        # After X the client keeps hidden helper windows for about a second; once the window the user
+        # saw is destroyed, those no longer count as "open".
+        self.monitor._handles, self.monitor._births = {10: 20, 11: 20}, {20: 100}
+        alive = {10, 11}
+        with patch('sandbox_manager.window_session.process_started', return_value=100), \
+             patch('sandbox_manager.window_session.windows_for_pids', side_effect=lambda pids: {h: 20 for h in alive}), \
+             patch('sandbox_manager.window_session._is_visible', side_effect=lambda h: h == 10), \
+             patch('sandbox_manager.window_session._is_window', side_effect=lambda h: h in alive), \
+             patch('sandbox_manager.window_session.any_client_window', return_value=False), \
+             patch('sandbox_manager.window_session.client_pids') as query:
+            self.assertEqual(self.monitor._windows(), {10})           # the visible one counts
+            alive.discard(10)                                          # X: the visible window is destroyed
+            self.assertEqual(self.monitor._windows(), {})              # helper 11 alone is not "open"
+            query.assert_not_called()
+
+    def test_minimized_or_hidden_main_window_still_counts(self):
+        self.monitor._handles, self.monitor._births = {10: 20}, {20: 100}
+        visible = {10}
+        with patch('sandbox_manager.window_session.process_started', return_value=100), \
+             patch('sandbox_manager.window_session.windows_for_pids', return_value={10: 20}), \
+             patch('sandbox_manager.window_session._is_visible', side_effect=lambda h: h in visible), \
+             patch('sandbox_manager.window_session._is_window', return_value=True):
+            self.assertEqual(self.monitor._windows(), {10})
+            visible.clear()                                            # hidden, not destroyed
+            self.assertEqual(self.monitor._windows(), {10})
 
     def test_live_window_uses_cached_identity_without_process_query(self):
         self.monitor._handles, self.monitor._births = {10: 20}, {20: 100}
