@@ -37,12 +37,11 @@ Skill을 복사해야 들어간다.
    powershell -ExecutionPolicy Bypass -File sandbox_manager\tools\setup_inbox.ps1
    ```
    `%USERPROFILE%\SecureCUA\codex-work\inbox`·`\shared`를 만들고, 그 아래에서는 이 PC가 아무것도 실행하지 못하게 한다(마지막 줄 `OK: ...`가 나와야 함)
-4. **Skill 복사**
+4. **Skill 넣기** — 팀 공용 Skill은 **host_control `codex/skills/secure-sandbox-run`**으로 옮겼다(2026-10-17, host_control #87)
    ```powershell
-   New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\skills" | Out-Null
-   Copy-Item -Recurse -Force sandbox_manager\codex_skill\secure-sandbox-run "$env:USERPROFILE\.codex\skills\"
+   powershell -ExecutionPolicy Bypass -File host_control\codex\install_skill.ps1
    ```
-   Skill이 바뀌면(`git pull` 뒤) 다시 복사한다
+   Skill이 바뀌면(host_control `git pull` 뒤) 다시 돌린다. 등록 예시도 host_control `codex/config.example.toml`에 있다
 5. **코덱스에 Host 등록:** `%USERPROFILE%\.codex\config.toml`에 추가하고 `<나>`를 자기 사용자 이름으로 바꾼다(경로는 `/`로)
    ```toml
    [mcp_servers.scrp]
@@ -139,7 +138,7 @@ watcher.stop(); m.stop(s, "TASK_COMPLETE"); m.cleanup(s)   # cleanup은 받는 �
 - Sandbox 안 지킴이(`input_watch.ps1`, 시작 스크립트가 Runner보다 먼저 띄움, 1초마다): 목록의 파일을 바탕화면 `Input`에 복사하고 **복사 전후 크기·SHA-256**을 목록과 비교 → `Desktop\input-check.txt`·`.html`에 `OK`/`FAIL`, 다르면 사본 삭제. 실행은 하지 않는다(실행은 Agent가 SCRP GUI 도구로). Sandbox엔 메모장이 없어 결과는 Edge로 여는 html도 만든다
 - 받는 폴더에서 Host가 실행하지 못하게: `tools/setup_inbox.ps1`(관리자 아님)이 폴더 안 파일마다 **Everyone 실행 거부** + OWNER RIGHTS(만든 사람도 권한을 못 바꿈)를 건다
 - 내려받기는 Host 몫이다(명세). 시연용으로 `tools/inbox_download.py`(https·공개 주소만, 50 MiB, zip 경로 검사)와 host_control을 고치지 않고 붙이는 `tools/host_with_inputs.py --inbox`가 있다. 정식 연결은 이준원(제안서 2026-10-08)
-- Codex에게 절차를 알려 주는 Skill: `codex_skill/secure-sandbox-run/SKILL.md` (`~/.codex/skills/`에 복사)
+- Codex에게 절차를 알려 주는 Skill: host_control `codex/skills/secure-sandbox-run/SKILL.md`로 옮김(2026-10-17). `codex\install_skill.ps1`로 설치
 
 ### Sandbox 창은 뒤에서 열림 (2026-10-12)
 
@@ -252,7 +251,7 @@ address = m.reset_sandbox(s, s.generation + 1)         # start()처럼 새 Host 
 | `tools/setup_inbox.ps1` | 받는 폴더 만들기 + 실행 거부 권한 + Host에서 실행 안 되는지 확인 (관리자 아님) |
 | `tools/inbox_download.py` | (시연용, Host 몫) MCP 도구 2개: `inbox_download`(https 공개 주소에서 받는 폴더로 내려받기, zip 풀기), `inbox_import`(다운로드 폴더의 파일을 이름으로 복사), `inbox_finish`(남길 것만 다운로드 폴더로, 나머지 삭제) |
 | `tools/host_with_inputs.py` | (시연용) host_control `mcp_server.py`를 고치지 않고 감싸서 `--input`(승인 창 뒤 사본) 또는 `--inbox`(받는 폴더 + `inbox_download`·`inbox_import` 도구, `--import-from`)를 붙임 |
-| `codex_skill/secure-sandbox-run/SKILL.md` | Codex Skill: 받기 → Sandbox → `input-check.html` 확인 → Sandbox 안에서 실행 절차 |
+| ~~`codex_skill/`~~ | Codex Skill은 host_control `codex/skills/secure-sandbox-run`으로 옮김(2026-10-17) |
 | `tools/install_firewall.ps1` / `uninstall_firewall.ps1` | 방화벽 규칙 + 재부팅 후 자동 복구 예약 작업 설치/제거 (관리자, 한 번) |
 
 ## 시험
