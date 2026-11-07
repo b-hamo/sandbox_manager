@@ -4,6 +4,12 @@
 Host(`b-hamo/host_control`)와 Runner(`b-hamo/sandbox_runner`) 사이에서, 사람 손 없이 Sandbox를 켜고 끄고 정리한다.
 Python 3.13.15, 표준 라이브러리만 쓴다.
 
+다중 채팅 준비(#57): `allocation.py`의 Windows 전역 mutex가 서로 다른 프로세스와
+workspace root에서도 WSB 점유 확인부터 시작 기록까지 직렬화한다. 잠금 점유나 권한
+오류는 `RUNTIME_UNAVAILABLE`이며 기존 VM을 종료하지 않는다. `start()`는 더 이상
+다른 Host의 고아 세션을 자동 회수하지 않는다. `reclaim_orphans()`는 명시적인 유지보수
+API로만 남는다. micro_VM 자동 배정과 세션별 중계는 아직 구현되지 않았다.
+
 **2026-09-29: 실제 Host + 실제 Runner와 전체 왕복 성공** (`tools/e2e_host.py`, Host·Runner 소스 수정 없음).
 
 저장소: `github.com/b-hamo/sandbox_manager` (배주한 관리). Host(`host_control`)는 패키지로 설치해서 부른다.
@@ -230,6 +236,7 @@ address = m.reset_sandbox(s, s.generation + 1)         # start()처럼 새 Host 
 | 파일 | 역할 |
 |---|---|
 | `sandbox_manager/manager.py` | 본체. prepare, start, publish_bootstrap, mark_ready, is_running, stop, cleanup, load |
+| `sandbox_manager/allocation.py` | Host 프로세스·workspace root를 넘어 WSB 시작 경쟁을 막는 Windows 전역 mutex. 점유·권한 오류는 기존 VM을 유지한 채 거부 |
 | `sandbox_manager/config.py` | .wsb 생성과 매핑 안전 검사, Guest 시작 스크립트, Guest 파일 지킴이(`INPUT_WATCH_PS1`) |
 | `sandbox_manager/inputs.py` | 파일 등록 `register_input()` (다 받아진 파일만, 크기·SHA-256·출처 고정) |
 | `sandbox_manager/inbox.py` | 받는 폴더: `check_inbox_root()`, `InboxScanner`(다 받아진 파일 목록·링크 삭제), `InboxWatcher` |
@@ -239,6 +246,7 @@ address = m.reset_sandbox(s, s.generation + 1)         # start()처럼 새 Host 
 | `sandbox_manager/network.py` | vSwitch 주소, Guest로 가는 Host 주소 |
 | `sandbox_manager/process.py` | Sandbox를 켠 Host 프로세스가 살아 있는지 (PID + 생성 시각, 주인 없는 Sandbox 회수용) |
 | `tests/test_manager.py` | 가짜 wsb·네트워크·방화벽·시계·프로세스로 42개 시험 (동시 호출, 주인 없는 Sandbox 회수 포함) |
+| `tests/test_allocation.py` | 실제 Windows mutex로 자식 프로세스·스레드의 중복 배정 거부와 예외 후 잠금 반환 검증. WSB는 시작하지 않음 |
 | `tests/test_isolation.py` | 격리 우회 시도 13개: 연결 폴더 안 junction·symlink·hard link(켜기 전·켠 뒤), 폴더 바꿔치기, 사용자 폴더·브라우저 프로필 직접 지정, `..` 탈출, .wsb에 Host 경로 새는지 |
 | `tools/smoke_real.py` | 실제 Sandbox로 Manager 단독 시험 (Host 없음) |
 | `tools/e2e_host.py` | 실제 Host(`sender.py --demo broker`) + 실제 Runner 전체 왕복. host_control venv로 실행 |
@@ -306,7 +314,7 @@ python tools/smoke_real.py <sandbox_runner.exe>
 - LogonCommand는 고정 문자열. 주소는 파일로 전달하고 Host·Guest 양쪽에서 IPv4인지 검사
 - Guest가 LAN 주소로 Host에 닿는 경우 거부 (방화벽이 못 거르는 NAT 경로)
 - 한 PC에 Sandbox 하나. 이미 떠 있으면 `RUNTIME_UNAVAILABLE`
-- **주인 없는 Sandbox 회수**: `start()`는 먼저 기록(state.json)을 보고, 켠 Host 프로세스가 죽었는데 안 끝난 세션(STARTING·STARTED·RUNNING)을 끄고 정리한다(`RUNTIME_ERROR`, 이벤트 `ORPHAN_RECLAIMED`). 켠 Host가 살아 있거나 확인이 안 되면 건드리지 않는다. 기록이 없는 Sandbox(손으로 켠 것 등)는 끄지 않고 거절한다. `reclaim_orphans()`로 따로 부를 수도 있다
+- **주인 없는 Sandbox 회수**: `start()`는 기존 VM을 그대로 두고 점유 오류를 반환한다. 별도로 승인된 유지보수에서 `reclaim_orphans()`를 명시 호출할 때만 죽은 소유자의 기록을 확인해 회수한다. 켠 Host가 살아 있거나 확인이 안 되면 건드리지 않으며 기록 없는 Sandbox도 종료하지 않는다.
 - 준비 표시 파일은 bootstrap.json이 완전한 JSON이 된 뒤, 인증서·주소 다음에 마지막으로
 - `wsb list`에서 사라진 것을 못 보면 TERMINATED로 기록하지 않는다
 - Guest 안 명령 실행(`wsb exec`)은 고정 문자열 `restart_command()` 하나뿐. 바깥에서 명령을 넘길 방법이 없다(Generic RPC 금지)
@@ -351,4 +359,4 @@ PowerShell 7에서 Windows PowerShell 자식의 모듈 탐색이 깨진 경우 �
 - Host 쪽 복구 연결(이준원): 언제 `restart_runner()`/`reset_sandbox()`를 부를지, 새 generation 세션 받아 주기, 진행 중 Action UNKNOWN 처리, Agent 알림
 - 네트워크 격리(미결 16): Guest outbound 차단 등
 - 받는 폴더 Host 연결(이준원, 제안서 2026-10-08): `--inbox`, `prepare(inbox=)`·InboxWatcher, `inbox_download` 도구를 Broker 정책·감사 안으로. 승인 여부·내려받기 주소 범위는 같이 정함
-- Codex 창을 갑자기 닫으면 Sandbox가 남음(다음 `start()`가 회수). 바로 정리하는 감시 프로세스는 아직
+- Codex 창을 갑자기 닫으면 Sandbox가 남음(명시적 유지보수로만 회수). 바로 정리하는 감시 프로세스는 아직

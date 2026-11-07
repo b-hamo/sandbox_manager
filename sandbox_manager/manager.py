@@ -28,9 +28,9 @@ Why the address comes after start: after a reboot the Default Switch does not ex
 Sandbox starts, and it comes back on a different subnet. The Guest start script therefore waits for
 the ready marker instead of taking the address on its command line.
 
-If the Host process dies (Codex closed or killed) its Sandbox would keep running and every later
-start() would fail with "already running". start() therefore first reclaims sessions whose owner
-process is gone (reclaim_orphans). A Sandbox with no session record here is never touched.
+If the Host process dies its Sandbox can keep running. A new start preserves it
+and reports occupied capacity. Explicit maintenance can call reclaim_orphans;
+ordinary startup never authorizes recovery or termination of another session.
 
 READY is never decided here: only the Host, after its own checks, may say so (SCRP).
 The workspace holds a live token between publish_bootstrap() and mark_ready(), so it must not be
@@ -267,8 +267,8 @@ class SandboxManager:
     def reclaim_orphans(self) -> list[str]:
         """Stop and clean up Sandboxes whose Host process died before stop(). Returns their session IDs.
 
-        start() calls this first. Only sessions recorded here are touched; a Sandbox without a record
-        (started by hand, or by another tool) is left alone and start() refuses as before.
+        Explicit maintenance only, never called by start(). Only sessions recorded here are touched;
+        a Sandbox without a record (started by hand or another tool) is left alone.
         """
         reclaimed = []
         sessions = self.root / "sessions"
@@ -449,14 +449,18 @@ class SandboxManager:
 
         The Runner cannot start yet: the Guest script waits for publish_bootstrap().
         """
+        from .allocation import windows_sandbox_slot
+        with windows_sandbox_slot():
+            return self._start_reserved(s)
+
+    def _start_reserved(self, s: SandboxSession) -> str:
         self._need(s, PREPARED)
-        self.reclaim_orphans()
         running = self.wsb.running()
         if running:
             # One Windows Sandbox per PC (PoC). A second session needs another Runtime (미결 13).
             # Either a live Host owns it, or nobody here started it: refuse, never stop it.
             raise SandboxManagerError(RUNTIME_UNAVAILABLE, f"a Windows Sandbox is already running: {sorted(running)}"
-                                      " (in use by another live Host, or not started by Sandbox Manager; close it first)")
+                                      " (preserved; no compatible alternative runtime is configured)")
 
         mappings = [config.Mapping(s.package_dir, config.GUEST_PACKAGE), config.Mapping(s.bootstrap_dir, config.GUEST_BOOTSTRAP)]
         if s.input_files:

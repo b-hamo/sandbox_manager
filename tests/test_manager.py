@@ -454,6 +454,9 @@ class Orphans(Base):
     def test_orphan_reclaimed_then_start_succeeds(self):
         old = self.left_running()
         m, s = self.next_start()
+        self.assertCode("RUNTIME_UNAVAILABLE", m.start, s)
+        self.assertEqual(m.load(old.session_id).state, RUNNING)
+        self.assertEqual(m.reclaim_orphans(), [old.session_id])  # explicit maintenance, never on start
         self.assertEqual(m.start(s), "192.168.208.1")
         again = m.load(old.session_id)
         self.assertEqual((again.state, again.termination_reason), (TERMINATED, "RUNTIME_ERROR"))
@@ -472,8 +475,10 @@ class Orphans(Base):
         m1.stop(first, "TASK_COMPLETE")
 
     def test_pid_reused_by_another_process(self):
-        self.left_running(owner={"pid": os.getpid(), "started": 99})   # same PID, different creation time
+        old = self.left_running(owner={"pid": os.getpid(), "started": 99})
         m, s = self.next_start()
+        self.assertCode("RUNTIME_UNAVAILABLE", m.start, s)
+        self.assertEqual(m.reclaim_orphans(), [old.session_id])
         m.start(s)
         self.assertEqual(s.state, STARTED)
         m.stop(s, "TASK_COMPLETE")
@@ -488,6 +493,8 @@ class Orphans(Base):
     def test_record_without_owner_is_reclaimed(self):
         old = self.left_running(owner={})
         m, s = self.next_start()
+        self.assertCode("RUNTIME_UNAVAILABLE", m.start, s)
+        self.assertEqual(m.reclaim_orphans(), [old.session_id])
         m.start(s)
         self.assertEqual(m.load(old.session_id).state, TERMINATED)
         m.stop(s, "TASK_COMPLETE")
@@ -514,7 +521,7 @@ class Orphans(Base):
         m, s = self.next_start()
         err = self.assertCode("RUNTIME_UNAVAILABLE", m.start, s)
         self.assertIn(stranger, self.wsb.live)
-        self.assertIn("close it first", err.message)
+        self.assertIn("preserved", err.message)
 
     def test_finished_and_broken_records_are_ignored(self):
         m1, done = self.started()
