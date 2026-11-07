@@ -131,6 +131,7 @@ class SandboxSession:
     shared: str | None = None
     timings: dict = field(default_factory=dict)
     events: list = field(default_factory=list)
+    micro_vm: dict | None = None               # immutable VM ownership + relay binding for this session
 
     @property
     def package_dir(self) -> Path:
