@@ -31,6 +31,7 @@ def ps_quote(value: str) -> str:
 
 
 class MicroVmManager(SandboxManager):
+    fixed_vm_binding = True
     guest_input_root = r"C:\RunnerInput"
 
     def __init__(self, root: Path, *, package: Path, vm_root: Path, relay: Path, **kwargs):

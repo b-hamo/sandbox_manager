@@ -10,7 +10,9 @@ Python 3.13.15, 표준 라이브러리만 쓴다.
 workspace root에서도 WSB 점유 확인부터 시작 기록까지 직렬화한다. 잠금 점유나 권한
 오류는 `RUNTIME_UNAVAILABLE`이며 기존 VM을 종료하지 않는다. `start()`는 더 이상
 다른 Host의 고아 세션을 자동 회수하지 않는다. `reclaim_orphans()`는 명시적인 유지보수
-API로만 남는다. micro_VM 자동 배정과 세션별 중계는 아직 구현되지 않았다.
+API로만 남는다. `MicroVmManager`가 세션별 중계를 제공하며, 앱 창 제한에 명시적으로 동의한
+`AutomaticVmManager(..., allow_app_window=True)`는 점유 여부에 따라 한 번만 백엔드를 배정한다.
+조회·시작 실패를 다른 VM으로 재시도하지 않는다. 전체 바탕화면 요구에 자동 적용하지 않는다.
 
 **2026-09-29: 실제 Host + 실제 Runner와 전체 왕복 성공** (`tools/e2e_host.py`, Host·Runner 소스 수정 없음).
 
