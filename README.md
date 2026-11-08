@@ -246,7 +246,9 @@ address = m.reset_sandbox(s, s.generation + 1)         # start()처럼 새 Host 
 | `sandbox_manager/inbox.py` | 받는 폴더: `check_inbox_root()`, `InboxScanner`(다 받아진 파일 목록·링크 삭제), `InboxWatcher` |
 | `sandbox_manager/importer.py` | 이미 받아 둔 파일을 받는 폴더로 복사 `import_to_inbox()` (다운로드 폴더 바로 안, 이름만, 링크·hard link 거부), zip 안전하게 풀기, 세션 끝 `finish_inbox()`(남길 것만 다운로드 폴더로·나머지 삭제)·`clear_inbox()` |
 | `sandbox_manager/firewall.py` | Host 방화벽 규칙이 현재 어댑터에 묶였는지, 17443·17444 허용·나머지 차단인지 검사(읽기만) |
-| `sandbox_manager/wsb.py` | `wsb` CLI 감싸기 (start, running, ip, connect, stop, exec — exec는 Runner 재시작 고정 명령에만) |
+| `sandbox_manager/wsb.py` | `wsb` CLI 감싸기 (start, running, ip, connect, stop, exec — exec는 Runner 재시작 고정 명령에만, share — 항상 읽기 전용) |
+| `sandbox_manager/programs.py` | 이 PC에 깔린 컴파일러·실행기(python, git, gcc, node, go, java, zig, dotnet, ruby, php)를 켜진 Sandbox에 읽기 전용으로 붙이기: 찾기(PATH 다음 흔한 설치 위치, 붙일 수 없는 것은 건너뜀)·폴더 검사·Guest 설정 줄. **없으면 받지 않고 "설치하세요"** (11/7, 포터블 zip 자동 받기 제거) |
+| `tests/test_programs.py` | 프로그램 붙이기: 찾기(venv·Store 별칭·Git 루트, 붙일 수 없는 사본 다음 후보로), 없으면 설치 안내·아무것도 안 받음, 사용자 폴더·드라이브 루트·junction 거부, 쓰기 옵션 없음, reset 뒤 다시 붙이기 |
 | `sandbox_manager/network.py` | vSwitch 주소, Guest로 가는 Host 주소 |
 | `sandbox_manager/process.py` | Sandbox를 켠 Host 프로세스가 살아 있는지 (PID + 생성 시각, 주인 없는 Sandbox 회수용) |
 | `tests/test_manager.py` | 가짜 wsb·네트워크·방화벽·시계·프로세스로 42개 시험 (동시 호출, 주인 없는 Sandbox 회수 포함) |
@@ -322,6 +324,24 @@ python tools/smoke_real.py <sandbox_runner.exe>
 - 준비 표시 파일은 bootstrap.json이 완전한 JSON이 된 뒤, 인증서·주소 다음에 마지막으로
 - `wsb list`에서 사라진 것을 못 보면 TERMINATED로 기록하지 않는다
 - Guest 안 명령 실행(`wsb exec`)은 고정 문자열 `restart_command()` 하나뿐. 바깥에서 명령을 넘길 방법이 없다(Generic RPC 금지)
+- **설치된 프로그램 붙이기**(`share_program`, 2026-10-27): 목록(`programs.PROGRAMS`)에 있는 컴파일러·실행기만, 그 설치 폴더 하나만, 항상 읽기 전용(`WsbCli.share`에 쓰기 옵션이 없음). 사용자 폴더와 그 상위·드라이브 루트 거부, 사용자 폴더 안은 `AppData\Local\Programs\...`만, 안에 junction·symlink가 있으면 거부(hard link는 개수만 기록: Git이 자기 실행 파일을 hard link로 둠). 사람에게 묻는 건 Host 몫
+
+## 이 PC에 깔린 프로그램을 Sandbox에서 쓰기 (2026-10-27)
+
+Sandbox는 켤 때마다 빈 Windows라 Python·Git·gcc가 없다. `share_program(s, name)`은 이 PC에 깔린 그 프로그램의 설치 폴더를 **켜진 Sandbox에 읽기 전용으로** 붙인다(`wsb share`, 다시 켜지 않음).
+
+```python
+info = manager.share_program(s, "python")     # python, git, gcc, node, go, java, zig, dotnet
+info["exe"]            # C:\Tools\python\python.exe
+info["cmd_setup_all"]  # 지금까지 붙인 것 전부: set "PATH=...;%PATH%" & set "PYTHONPYCACHEPREFIX=%TEMP%\pycache" ...
+```
+
+- Guest 위치: `C:\Tools\<이름>`. gcc만 `C:\Tools\gcc\ucrt64`(MSYS2 gcc가 `bin\..\..\ucrt64`에서 헤더를 찾음)
+- 캐시·패키지는 Guest 자기 디스크(`%TEMP%`)로: 붙인 폴더에는 못 쓰니까
+- 설치·서비스·라이선스가 필요한 프로그램(Office, Adobe, Visual Studio)은 이 방식으로 안 된다 → 목록에 없음
+- `reset_sandbox()` 뒤 새 Sandbox에 다시 붙임(다시 검사)
+- 실제 확인(2026-10-27, 빈 Sandbox): 붙이기 각 0.3~0.4초, `python` 3.13.15 실행, `git --version`, gcc로 C 컴파일·실행(`hello from gcc 42`), 붙인 폴더 쓰기 "Access is denied", 이 PC 원본 3개 폴더 파일 37,481개 변경 0
+- 아직: Host 도구(Agent가 부르는 것)·확인 창, Skill 안내
 
 ## Sandbox 화면 창 닫기와 세션 종료
 

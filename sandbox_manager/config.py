@@ -4,7 +4,8 @@ Rules (CLAUDE.md "절대 하지 않는 것"):
 - every mapped folder is read-only, except the per-session shared folder (build_wsb(shared=...),
   배주한 요청 2026-10-15): a new folder where nothing runs on the Host, see shared.py
 - only folders inside this session's own workspace can be mapped (no user folders, browser
-  profiles, Safe Results, or Host output)
+  profiles, Safe Results, or Host output). Exception (배주한 요청 2026-10-27): an installed compiler or
+  interpreter's own folder, shared read-only while running (programs.py), never through the .wsb
 - nothing inside a mapped folder may lead elsewhere on the Host: no junction, symlink or other
   reparse point, and no hard-linked file (tests/test_isolation.py)
 - user files reach the Guest only as copies inside the workspace, never by mapping the user's folder
