@@ -45,7 +45,9 @@ class WsbCli:
         if not self.exe:
             raise SandboxManagerError(RUNTIME_UNAVAILABLE, "wsb CLI not found; Windows Sandbox is required")
         try:
-            proc = subprocess.run([self.exe, *args, "--raw"], capture_output=True, timeout=timeout)
+            # Redirecting output alone still creates a console when the Host uses pythonw.
+            proc = subprocess.run([self.exe, *args, "--raw"], capture_output=True, timeout=timeout,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except subprocess.TimeoutExpired:
             raise SandboxManagerError(RUNTIME_UNAVAILABLE, f"wsb {args[0]} timed out after {timeout}s") from None
         out = (_decode(proc.stdout) + _decode(proc.stderr)).strip()
@@ -95,7 +97,8 @@ class WsbCli:
         if not self.exe:
             raise SandboxManagerError(RUNTIME_UNAVAILABLE, "wsb CLI not found")
         subprocess.Popen([self.exe, "connect", "--id", sandbox_id],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     def watch_window(self, sandbox_id: str, *, log=None):
         from .window_session import WindowSession
