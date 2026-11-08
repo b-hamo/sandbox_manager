@@ -36,7 +36,7 @@ def _decode(raw: bytes) -> str:
 
 
 class WsbCli:
-    """The real CLI. Tests replace this with a fake that has the same five methods."""
+    """The real CLI. Tests replace this with a fake that has the same methods."""
 
     def __init__(self, exe: str | None = None):
         self.exe = exe or shutil.which("wsb")
@@ -106,6 +106,11 @@ class WsbCli:
 
     def stop(self, sandbox_id: str) -> None:
         self._run("stop", "--id", sandbox_id, timeout=60)
+
+    def share(self, sandbox_id: str, host_path: str, guest_path: str) -> None:
+        """Share a Host folder into the running Sandbox, read-only (probe 2026-10-27: visible within a second).
+        There is deliberately no way to pass -w/--allow-write here (programs.py)."""
+        self._run("share", "--id", sandbox_id, "--host-path", host_path, "--sandbox-path", guest_path, timeout=60)
 
     def exec(self, sandbox_id: str, command: str, *, logon_wait_s: float = 60, timeout: float = 60) -> int:
         """Run `command` in the Guest as the logged-in user and return its exit code."""

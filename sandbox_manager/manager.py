@@ -58,6 +58,7 @@ from .firewall import FIX_COMMAND, FirewallCheck
 from .inbox import InboxScanner, _within, check_inbox_root
 from .shared import sweep_share
 from .inputs import InputFile, check_file, sha256_of
+from .programs import FoundProgram, check_program_root, cmd_setup, find_program
 from .network import HostNetwork
 from .process import process_started
 from .wsb import WsbCli
@@ -129,6 +130,9 @@ class SandboxSession:
     # The per-session shared folder (prepare(shared=...), shared.make_share), mapped writable at
     # config.GUEST_SHARED. Not removed by cleanup(): the Host calls shared.finish_shared() for it.
     shared: str | None = None
+    # Programs installed on this PC, shared read-only into the running Sandbox (share_program, programs.py):
+    # [{"name", "host_root", "guest_root", "hard_links", "shared_at"}]. Not part of the .wsb: added while running.
+    programs: list = field(default_factory=list)
     timings: dict = field(default_factory=dict)
     events: list = field(default_factory=list)
     micro_vm: dict | None = None               # immutable VM ownership + relay binding for this session
@@ -423,6 +427,48 @@ class SandboxManager:
             self._event(s, kind, **fields)
         return events
 
+    @_locked
+    def share_program(self, s: SandboxSession, name: str) -> dict:
+        """Share an installed program (programs.PROGRAMS) into the running Sandbox, read-only.
+
+        Returns programs.FoundProgram.for_agent(): Guest folder, exe, PATH entries, env and a cmd line
+        that sets them, plus "cmd_setup_all" for every program shared so far. Asking the person first
+        is the Host's job. Sharing the same program again returns the same answer.
+        """
+        self._need(s, STARTED, RUNNING)
+        if not self.is_running(s):
+            raise SandboxManagerError(RUNTIME_UNAVAILABLE, f"sandbox {s.sandbox_id} is not running")
+        for p in s.programs:
+            if p["name"] == name:
+                return self._program_answer(s, FoundProgram(name, Path(p["host_root"]), p["exe"], source=p.get("source", "installed")))
+        found = find_program(name, check=check_program_root)
+        self.wsb.share(s.sandbox_id, str(found.root.resolve()), found.guest_root)   # real path (MSIX redirects AppData)
+        s.programs.append({"name": name, "host_root": str(found.root), "exe": found.exe,
+                           "guest_root": found.guest_root, "hard_links": found.hard_links, "source": found.source,
+                           "shared_at": _now()})
+        self._event(s, "PROGRAM_SHARED", name=name, host_root=str(found.root), guest_root=found.guest_root,
+                    read_only=True, hard_links=found.hard_links, source=found.source)
+        return self._program_answer(s, found)
+
+    @staticmethod
+    def _program_answer(s: SandboxSession, found: FoundProgram) -> dict:
+        answer = found.for_agent()
+        answer["cmd_setup_all"] = cmd_setup([FoundProgram(p["name"], Path(p["host_root"]), p["exe"])
+                                             for p in s.programs])
+        return answer
+
+    def _reshare_programs(self, s: SandboxSession) -> None:
+        """A reset Sandbox is a new one: give it the programs the old one had (checked again)."""
+        for p in list(s.programs):
+            try:
+                found = find_program(p["name"], check=check_program_root)
+                self.wsb.share(s.sandbox_id, str(found.root.resolve()), found.guest_root)   # real path (MSIX redirects AppData)
+                self._event(s, "PROGRAM_SHARED", name=p["name"], host_root=str(found.root),
+                            guest_root=found.guest_root, read_only=True, again=True)
+            except SandboxManagerError as exc:
+                s.programs.remove(p)
+                self._event(s, "PROGRAM_SHARE_FAILED", name=p["name"], error=exc.message)
+
     def _copy_inputs(self, s: SandboxSession, sources: list[tuple[Path, InputFile | None]]) -> None:
         s.input_dir.mkdir()
         total = 0
@@ -665,7 +711,9 @@ class SandboxManager:
         s.sandbox_id = s.guest_ip = s.host_address = None
         self._state(s, PREPARED, recovery="sandbox", old_sandbox_id=old_id, generation_from=old, generation=generation,
                     restarts=s.restarts)
-        return self.start(s)
+        address = self.start(s)
+        self._reshare_programs(s)
+        return address
 
     def _fail(self, s: SandboxSession, exc: SandboxManagerError) -> None:
         """Never leave a Sandbox running after a failed start."""
