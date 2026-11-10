@@ -1,5 +1,30 @@
 # 명시적 micro_VM 백엔드 (#57)
 
+## 작업 전 앱 준비
+
+`prepare_apps(session, names)`는 현재 세션에서만 앱을 준비한다. 알려진 Guest 실행 경로를 먼저 확인하고,
+없으면 Host PATH·Windows App Paths·등록된 설치 경로에서 찾아 필요한 앱 폴더를 세션 package로 복사한다.
+여러 파일인 프로그램은 감시 공유 밖에서 ZIP을 완성해 한 파일로 게시한다. Guest는 ZIP 해시·경로·크기,
+펼친 파일별 해시를 검사하고 해당 VM의 전용 폴더에 연결한다. Host 원본과 전달 공유는 읽기 전용이며
+Guest에서 펼친 앱 사본은 Guest 소유다. 수천 개 파일을 관리 서비스로 개별 전송하지 않는다.
+메모장과 cmd/PowerShell, 기존 프로그램 목록(python/git/gcc/node/go/java/zig/dotnet/ruby/php)을 지원한다.
+Host 원본은 수정하지 않으며 Guest 해시 검사가 끝나야 PREPARED다. 이는 파일 준비 증거이고 앱 실행 성공은 아니다.
+세션 잠금과 지속 상태로 중복 준비를 막으며 불확실한 응답/이전 PREPARING은 UNKNOWN으로 남겨 재시도하지 않는다.
+Host 설치본이 없으면 NEEDS_INSTALL, 알려진 제공 방법이 없으면 UNSUPPORTED다. Agent는 작업 목적에 맞는
+공식 설치 파일을 기존 inbox로 받아 같은 Guest 안에서 설치·확인한다. 임의 Host 경로나 명령을 앱 이름으로 실행하지 않는다.
+micro_VM은 관리 서비스의 해당 세션 package와 Guest 프로세스 영수증을 사용한다. WSB 전용 share/exec를 호출하지 않는다.
+AutomaticVmManager도 고정된 backend로 앱 준비와 기존 program_share를 전달한다.
+`tests/test_app_preparation.py`는 Guest 재사용, 의존 파일/해시, 재조회, 응답 소실, 설치 필요 결과를 검사한다.
+
+2026-11-10 실제 micro_VM `94c38f45-2a7c-4275-b3cc-56dd7556730f`에서 PowerShell 재사용,
+메모장 제공, Python 3.13.16 묶음 전송/Guest 검사를 확인했다. Python 준비는 약 105초였고
+Router RUN-0001은 `GUEST_PROCESS_VERIFIED`, exit 0, execution_count 1을 기록했다.
+한글 TXT 46바이트는 Defender 검사 뒤 ART-000001로 반출됐다. 증거는
+`C:\SCRPAppLab\app-prepare-bundle-20261110`의 요청별 결과·versions.json에 보존한다.
+Manager 회귀검증은 260 passed, 1 skipped, 8 subtests passed다.
+이 VM의 메모장 추가 GUI 시험은 실행창을 열지 않은 입력이 거부돼 실행하지 않았다.
+이전 별도 VM의 메모장 GUI 검증과 이번 Python 실행 검증을 구분한다.
+
 MicroVmManager(root, package=..., vm_root=..., relay=...)는 기존 SandboxSession과 bootstrap을 사용하는 앱 창 백엔드다.
 AutomaticVmManager(..., allow_app_window=True)는 WSB 시작 잠금 아래 점유 여부를 확인하여 비었으면 WSB,
 점유됐으면 앱 창 micro_VM을 선택한다. 전체 바탕화면 요구에 자동 적용하지 않는다.
@@ -9,6 +34,24 @@ tests/test_automatic.py는 가짜 VM 백엔드로 점유·오류·고정 배정�
 관리·종료 전에 재검사한다. 다른 VM을 선택하거나 이동시키지 않는다.
 기존 Runner 사본·cert·bootstrap·inbox 검사와 세션별 경로를 유지한다. 공유는 읽기 전용이다.
 Guest 입력은 C:\RunnerInput, 진단은 C:\RunnerLogs이며 사용자 이름에 의존하지 않는다.
+
+### 기본 메모장 제공
+
+앱 창 VM의 최초 bootstrap 게시 전에 Host Windows System32의 클래식 `notepad.exe`와
+언어별 `notepad.exe.mui`를 해당 세션의 `RunnerPackage/builtin-apps/notepad`에 복사한다.
+minoBox `--app notepad`와 같은 파일 구성이며 Windows 폴더 전체를 공유하거나 Host에서 실행하지 않는다.
+복사본 SHA-256 manifest를 남기고 Guest 준비 단계에서 다시 검사한다. 준비 실패는 Runner 시작 전
+`RUNTIME_UNAVAILABLE`로 보고하며 입력을 전송하거나 재전송하지 않는다.
+새 Runner의 앱 창 백엔드가 이 경로를 자신의 PATH에 추가하므로 전용 실행창과 그 자식 프로세스에서
+`notepad`/`notepad.exe`를 사용할 수 있다. 이 변경은 Manager와 Runner를 함께 배포해야 한다.
+재연결 시 기존 세션 사본을 사용하며 다른 세션이나 Host 원본을 수정하지 않는다.
+`tests/test_builtin_apps.py`는 선택 복사, 세션 분리, 원본 부재, 해시 불일치, 기존 사본 덮어쓰기 거부를 검사한다.
+2026-11-10 실제 VM `234b05aa-9d2a-4312-b082-7ddc502344e3`에서 추가 옵션 없이
+`notepad.exe` 실행 및 `메모장 자동 제공 확인`/`Hello World` 입력 화면을 확인했다.
+Runner SHA-256은 `07493a84a8eab91d60c398d398bab4cd4be9ec51687f43fa810884d0a0318c75`다.
+초기 Guest 검사에서 PowerShell 5.1 배열 중첩 오류가 발생해 수정했고, 실제 PowerShell 파일 검사를 포함한
+Manager 회귀검증은 249 passed, 1 skipped, 8 subtests passed다.
+증거는 `C:\SCRPAppLab\notepad-auto2-20261110`에 있으며 메모장 저장·반출과 일반 채팅 기본 배포 반영은 별도다.
 
 Host relay는 정확한 VM GUID와 무작위 service GUID에 묶이고 Guest는 loopback으로 접속한다.
 READY는 기존 SCRP handshake/startup 검증으로 결정한다. VM Running이나 relay ready 파일만으로 판정하지 않는다.

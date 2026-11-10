@@ -72,6 +72,12 @@ class AutomaticVmManager(SandboxManager):
     def publish_bootstrap(self, s, host_cert_pem):
         return self._backend(s).publish_bootstrap(s, host_cert_pem)
 
+    def prepare_apps(self, s, apps):
+        return self._backend(s).prepare_apps(s, apps)
+
+    def share_program(self, s, name):
+        return self._backend(s).share_program(s, name)
+
     def is_running(self, s):
         return self._backend(s).is_running(s)
 

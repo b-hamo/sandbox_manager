@@ -46,6 +46,17 @@ def test_free_wsb_is_reserved_through_start(allocation):
     manager.micro.start.assert_not_called()
 
 
+def test_app_preparation_uses_bound_micro_backend(allocation):
+    manager, session, wsb = allocation
+    session.runtime_type = "MICRO_VM_APP_WINDOW"
+    manager.micro.prepare_apps = Mock(return_value={"prepared": True})
+    manager.micro.share_program = Mock(return_value={"exe": r"C:\Tools\python\python.exe"})
+    assert manager.prepare_apps(session, ["python"])["prepared"]
+    assert manager.share_program(session, "python")["exe"].endswith("python.exe")
+    manager.micro.prepare_apps.assert_called_once_with(session, ["python"])
+    wsb.share.assert_not_called()
+
+
 def test_busy_wsb_selects_micro_without_mutating_existing_vm(allocation):
     manager, session, wsb = allocation
     wsb.running.return_value = {"other-wsb"}

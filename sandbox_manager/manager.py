@@ -133,6 +133,7 @@ class SandboxSession:
     # Programs installed on this PC, shared read-only into the running Sandbox (share_program, programs.py):
     # [{"name", "host_root", "guest_root", "hard_links", "shared_at"}]. Not part of the .wsb: added while running.
     programs: list = field(default_factory=list)
+    app_preparations: dict = field(default_factory=dict)
     timings: dict = field(default_factory=dict)
     events: list = field(default_factory=list)
     micro_vm: dict | None = None               # immutable VM ownership + relay binding for this session
@@ -426,6 +427,27 @@ class SandboxManager:
         for kind, fields in events:
             self._event(s, kind, **fields)
         return events
+
+    @_locked
+    def prepare_apps(self, s: SandboxSession, apps: list[str]) -> dict:
+        from .app_preparation import prepare_apps
+        self._need(s, STARTED, RUNNING)
+        if (not isinstance(apps, list) or len(apps) > 16 or
+                any(not isinstance(name, str) or not 1 <= len(name.strip()) <= 64 for name in apps)):
+            raise SandboxManagerError(INVALID_ARGUMENT, "apps must contain at most 16 application names")
+        if not self.is_running(s):
+            raise SandboxManagerError(RUNTIME_UNAVAILABLE, "bound runtime is not running")
+        return prepare_apps(self, s, apps)
+
+    def _sync_app_package(self, s: SandboxSession) -> None:
+        config.check_contents(s.package_dir)
+
+    def _app_guest_exit(self, s: SandboxSession, script: str) -> int:
+        import base64
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        return self.wsb.exec(s.sandbox_id,
+                            "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand " + encoded,
+                            logon_wait_s=0, timeout=120)
 
     @_locked
     def share_program(self, s: SandboxSession, name: str) -> dict:
@@ -730,10 +752,12 @@ class SandboxManager:
         if s.state not in (TERMINATED, FAILED, PREPARED):
             raise SandboxManagerError(INVALID_ARGUMENT, f"session is {s.state}; stop it first")
         removed, failed = [], []
-        for target in (s.bootstrap_dir, s.package_dir, s.input_dir, s.wsb_path):
+        for target in (s.bootstrap_dir, s.package_dir, s.input_dir, s.wsb_path, s.dir / "app-staging"):
             if not target.exists():
                 continue
             try:
+                if not target.resolve().is_relative_to(s.dir.resolve()):
+                    raise OSError("cleanup target escapes session directory")
                 shutil.rmtree(target) if target.is_dir() else target.unlink()
                 removed.append(target.name)
             except OSError as exc:
