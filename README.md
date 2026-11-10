@@ -376,6 +376,23 @@ PowerShell 7에서 Windows PowerShell 자식의 모듈 탐색이 깨진 경우 �
 
 ## 남은 것
 
+### 선택적 micro_VM 관리 서비스
+
+micro_VM package 안에 보호된 `management.json`이 있으면 `management_service.py`가 설치된
+`MinoVmService.exe --client`를 사용한다. 일반 Host는 세션별 capability와 영속 시작 요청 ID를
+보관하고, 서비스는 전체 workspace/container ID와 소유권을 검사한다. 상태는 서비스 RPC로
+조회하며 High 실행기의 상태 파일을 직접 열지 않는다. 다른 세션이나 새 VM으로 복구 이동하지 않는다.
+
+공유할 파일은 일반 Host 권한으로 읽고 바이트·해시만 서비스로 전달한다. 원본 Host 경로는
+전달하지 않는다. 세션별 읽기 전용 사본을 게시하고 변경을 감시한다. 불확실한 변경 응답은
+자동 재실행하지 않으며 파일 변경 감시도 중단해 실패를 보존한다. 앱·Router 결과는 기존
+SCRP 검사·반출 절차를 따른다. 설치 방법과 현재 계정·업그레이드 제한은 micro_VM의
+`docs/management-service.md`에 있다.
+
+검증: `tests/test_management_service.py`는 영속 요청 ID, 중복 전송 방지, 청크 해시,
+Host 경로 미전달, 보호된 상태 파일을 열지 않는 조회와 VM 소유권 불일치를 검사한다.
+이는 실제 VM 시험과 구분하며 Host 통합 기록에 실제 Manager 로드 경로·wheel 해시를 남긴다.
+
 - Host 연결 고리: 이준원이 `mcp_server`에서 부르기로 함(`task_submit` 때 켜기). 인증서 SAN·재생성·1일 버그도 이준원이 수정 예정
 - `task_submit` 응답 방식: READY까지 18초, 재부팅 직후 1분 이상 → 바로 답하고 `runtime_get_state`로 확인하는 방식 제안(이준원 결정)
 - Runner pinning 전환(Runner 담당과 논의): 되면 Guest의 `certutil` 단계 제거 가능
