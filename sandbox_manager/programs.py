@@ -125,7 +125,7 @@ def _python_base(exe: Path) -> Path:
     return exe
 
 
-def find_program(name: str, *, which=shutil.which, check=None) -> FoundProgram:
+def find_program(name: str, *, which=shutil.which, check=None, candidates=()) -> FoundProgram:
     """This PC's installed copy that `check` (check_program_root) accepts.
 
     Every candidate is tried in turn (PATH first, then the usual install places). Found 2026-11-03: the
@@ -137,7 +137,7 @@ def find_program(name: str, *, which=shutil.which, check=None) -> FoundProgram:
         raise SandboxManagerError(INVALID_ARGUMENT, f"{name!r} cannot be shared; known: {sorted(PROGRAMS)}")
     check = check or (lambda found: found)
     refused = None
-    for c in [which(spec.exe.removesuffix(".exe"))] + list(spec.known):
+    for c in [which(spec.exe.removesuffix(".exe"))] + list(candidates) + list(spec.known):
         found = _candidate(name, c)
         if found is None:
             continue
@@ -190,6 +190,11 @@ def check_program_root(found: FoundProgram, *, home: Path | None = None) -> Foun
         # (both forms: a folder may exist partly in the real and partly in the redirected place)
         programs = home / "AppData" / "Local" / "Programs"   # per-user installs (Python, Node, VS Code...)
         allowed = {programs, programs.resolve()}
+        # Python Install Manager's per-user runtime store (not the whole
+        # AppData/Local tree). Only a pythoncore runtime root is eligible.
+        python_store = home / "AppData" / "Local" / "Python"
+        if found.name == "python" and root.name.startswith("pythoncore-") and root.parent == python_store.resolve():
+            allowed.add(python_store.resolve())
         if not any(a in r.parents for a in allowed for r in (root, root.resolve())):
             raise SandboxManagerError(INVALID_ARGUMENT, f"{root} is inside the user's profile")
     files = hard_links = 0

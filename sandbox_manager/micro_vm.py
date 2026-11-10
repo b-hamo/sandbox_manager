@@ -16,6 +16,7 @@ from pathlib import Path
 
 from . import config
 from .allocation import micro_vm_slot
+from .builtin_apps import stage_notepad, VERIFY_NOTEPAD_PS1
 from .errors import INVALID_ARGUMENT, RUNTIME_UNAVAILABLE, SandboxManagerError
 from .manager import (SandboxManager, SandboxSession, _locked, PREPARED, STARTING,
                       STARTED, RUNNING, RESTARTING, TERMINATED, FAILED, TERMINATION_REASONS)
@@ -264,6 +265,8 @@ class MicroVmManager(SandboxManager):
         if any(type(port) is not int or not 1 <= port <= 65535 for port in ports):
             raise SandboxManagerError(INVALID_ARGUMENT, "invalid SCRP relay ports")
         shutil.copyfile(self.relay, s.package_dir / "ScrpRelay.exe")
+        app_files = stage_notepad(s.package_dir)
+        self._event(s, "MICRO_VM_BUILTIN_APP_STAGED", app="notepad", files=app_files)
         context = {"contract": "scrp-micro-vm-v1", "session_id": s.session_id,
                    "runtime_id": s.runtime_id, "generation": s.generation,
                    "workspace_id": s.micro_vm["workspace_id"], "container_id": s.micro_vm["container_id"],
@@ -307,6 +310,7 @@ class MicroVmManager(SandboxManager):
         script = "$ErrorActionPreference='Stop'\nNew-Item -ItemType Directory -Force C:\\RunnerLogs,C:\\RunnerInput | Out-Null\nStart-Transcript C:\\RunnerLogs\\launch.txt\ntry {\n"
         for source, target in links:
             script += f"New-Item -ItemType SymbolicLink -Path {ps_quote(target)} -Target {ps_quote(source)} | Out-Null\n"
+        script += VERIFY_NOTEPAD_PS1
         for channel in channels:
             args = ["guest", "{" + s.micro_vm["container_id"] + "}", "{" + channel["service"] + "}",
                     str(channel["port"])]
@@ -342,6 +346,29 @@ class MicroVmManager(SandboxManager):
                 type(reply.get("run_id")) is not int or reply["run_id"] < 1):
             raise SandboxManagerError(RUNTIME_UNAVAILABLE, "Guest launch outcome unknown; never replayed")
         return reply
+
+    def _sync_app_package(self, s):
+        super()._sync_app_package(s)
+        self._record(s)
+        if self.management:
+            with self.management.lock:
+                self.management.mappings[(s.session_id, "package")] = s.package_dir
+                self.management.sync(s.session_id)
+
+    def _app_guest_exit(self, s, script):
+        self._record(s)
+        if not s.micro_vm.get("process_status_v1"):
+            raise SandboxManagerError(RUNTIME_UNAVAILABLE, "app preparation requires verified Guest process receipts")
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        launched = self._run_tracked(s, "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand " + encoded)
+        row = self._wait_run(s, launched, exit_required=True)
+        return row["process_status"]["exit_code"]
+
+    def share_program(self, s, name):
+        result = self.prepare_apps(s, [name])
+        if not result["prepared"]:
+            raise SandboxManagerError(RUNTIME_UNAVAILABLE, f"application preparation incomplete: {result['apps']}")
+        return result["apps"][0]
 
     def _run_record(self, s, run_id):
         info = self._control(s, {"cmd": "info"})
