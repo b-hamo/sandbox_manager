@@ -24,7 +24,8 @@ def allocation(tmp_path, monkeypatch):
     session.dir.mkdir()
     held = []
     @contextmanager
-    def slot():
+    def slot(wait_ms=0):
+        assert wait_ms == 10000
         held.append(True)
         try: yield
         finally: held.pop()
@@ -83,3 +84,27 @@ def test_micro_failure_and_reset_cannot_reassign(allocation):
 def test_app_window_permission_required(tmp_path):
     with pytest.raises(SandboxManagerError, match="explicit app-window"):
         AutomaticVmManager(tmp_path, package=tmp_path, vm_root=tmp_path, relay=tmp_path)
+
+
+@pytest.mark.parametrize("occupied", [False, True])
+def test_listener_plan_matches_actual_backend(allocation, occupied):
+    manager, session, wsb = allocation
+    wsb.running.return_value = {"existing"} if occupied else set()
+    plan = manager.listener_binding()
+    assert plan == ({"host": "127.0.0.1", "port": 0, "upload_port": 0} if occupied else
+                    {"host": "0.0.0.0", "port": 17443, "upload_port": 17444})
+    manager.start(session)
+    assert manager.micro.start.called == occupied
+
+
+@pytest.mark.parametrize("occupied", [False, True])
+def test_occupancy_race_never_starts_wrong_listener_backend(allocation, occupied):
+    manager, session, wsb = allocation
+    wsb.running.return_value = {"existing"} if occupied else set()
+    manager.listener_binding()
+    wsb.running.return_value = set() if occupied else {"new-owner"}
+    with pytest.raises(SandboxManagerError, match="occupancy changed"):
+        manager.start(session)
+    manager.micro.start.assert_not_called()
+    manager._start_reserved.assert_not_called()
+    assert session.state == PREPARED and session.sandbox_id is None
