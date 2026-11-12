@@ -23,8 +23,9 @@ class AutomaticVmManager(SandboxManager):
         self.micro._locks, self.micro._locks_guard = self._locks, self._locks_guard
         self._selected = None
         self._listener_binding = None
+        self._listener_ports_busy = False
 
-    def listener_binding(self):
+    def listener_binding(self, *, wsb_listeners_busy=False):
         """Plan reachable listeners before boot; start rechecks under the OS lock.
 
         This is not a VM reservation. If occupancy changes before start, refuse
@@ -32,6 +33,18 @@ class AutomaticVmManager(SandboxManager):
         """
         if self._selected is not None:
             raise SandboxManagerError(RUNTIME_UNAVAILABLE, "runtime already bound")
+        if type(wsb_listeners_busy) is not bool:
+            raise SandboxManagerError(INVALID_ARGUMENT, "listener occupancy must be a boolean")
+        if wsb_listeners_busy:
+            if self._listener_binding != "WINDOWS_SANDBOX":
+                raise SandboxManagerError(RUNTIME_UNAVAILABLE, "no unbound WSB listener plan to replace")
+            # Host saw EADDRINUSE and closed its own partial listeners. No VM
+            # has started, and no other Host or VM is stopped to free the ports.
+            self._listener_ports_busy = True
+            self._listener_binding = "MICRO_VM_APP_WINDOW"
+            return {"host": "127.0.0.1", "port": 0, "upload_port": 0}
+        if self._listener_ports_busy:
+            return {"host": "127.0.0.1", "port": 0, "upload_port": 0}
         with windows_sandbox_slot(wait_ms=10000):
             self._listener_binding = "MICRO_VM_APP_WINDOW" if self.wsb.running() else "WINDOWS_SANDBOX"
         if self._listener_binding == "WINDOWS_SANDBOX":
@@ -54,18 +67,19 @@ class AutomaticVmManager(SandboxManager):
         self._need(s, PREPARED)
         if self._selected is not None or s.sandbox_id or s.micro_vm:
             raise SandboxManagerError(RUNTIME_UNAVAILABLE, "runtime already selected; automatic reassignment refused")
-        # Contention/access/query failures propagate. Only positively observed WSB
-        # occupancy selects micro_VM; a failed WSB start never triggers fallback.
+        # Query/access failures propagate. Positive WSB or listener occupancy
+        # selects micro_VM before boot; a failed WSB start never triggers fallback.
         with windows_sandbox_slot(wait_ms=10000):
             occupied = self.wsb.running()
-            selected = "MICRO_VM_APP_WINDOW" if occupied else "WINDOWS_SANDBOX"
+            selected = "MICRO_VM_APP_WINDOW" if occupied or self._listener_ports_busy else "WINDOWS_SANDBOX"
             if self._listener_binding is not None and self._listener_binding != selected:
                 raise SandboxManagerError(RUNTIME_UNAVAILABLE,
                                           "WSB occupancy changed after listener planning; no VM started")
             self._selected = selected
             s.runtime_type = self._selected
-            self._event(s, "RUNTIME_SELECTED", runtime_type=self._selected, occupied_wsb=sorted(occupied))
-            if not occupied:
+            self._event(s, "RUNTIME_SELECTED", runtime_type=self._selected, occupied_wsb=sorted(occupied),
+                        listener_ports_busy=self._listener_ports_busy)
+            if selected == "WINDOWS_SANDBOX":
                 return self._start_reserved(s)
         return self.micro.start(s)
 

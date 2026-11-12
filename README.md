@@ -13,6 +13,8 @@ workspace root에서도 WSB 점유 확인부터 시작 기록까지 직렬화한
 API로만 남는다. `MicroVmManager`가 세션별 중계를 제공하며, 앱 창 제한에 명시적으로 동의한
 `AutomaticVmManager(..., allow_app_window=True)`는 점유 여부에 따라 한 번만 백엔드를 배정한다.
 조회·시작 실패를 다른 VM으로 재시도하지 않는다. 전체 바탕화면 요구에 자동 적용하지 않는다.
+Host가 VM 생성 전에 WSB용 고정 listener의 점유를 확인하면 micro_VM 계획으로 전환할 수 있다.
+부분 listener 정리와 양쪽 버전 적용 조건은 [listener 점유 처리](docs/micro-vm.md)를 따른다.
 
 **2026-09-29: 실제 Host + 실제 Runner와 전체 왕복 성공** (`tools/e2e_host.py`, Host·Runner 소스 수정 없음).
 

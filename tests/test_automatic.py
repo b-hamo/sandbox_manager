@@ -97,6 +97,43 @@ def test_app_window_permission_required(tmp_path):
         AutomaticVmManager(tmp_path, package=tmp_path, vm_root=tmp_path, relay=tmp_path)
 
 
+@pytest.mark.parametrize('occupied', [False, True])
+def test_busy_listener_plan_keeps_micro_even_before_wsb_boot(allocation, occupied):
+    manager, session, wsb = allocation
+    assert manager.listener_binding()['upload_port'] == 17444
+    assert manager.listener_binding(wsb_listeners_busy=True) == {
+        'host': '127.0.0.1', 'port': 0, 'upload_port': 0}
+    wsb.running.return_value = {'other-wsb'} if occupied else set()
+    assert manager.listener_binding()['port'] == 0
+    assert manager.start(session) == '127.0.0.1'
+    assert session.runtime_type == 'MICRO_VM_APP_WINDOW'
+    manager._start_reserved.assert_not_called()
+    manager.micro.start.assert_called_once_with(session)
+    wsb.stop.assert_not_called()
+    with pytest.raises(SandboxManagerError, match='already bound'):
+        manager.listener_binding(wsb_listeners_busy=True)
+
+
+def test_busy_listener_requires_existing_unbound_wsb_plan(allocation):
+    manager, session, wsb = allocation
+    with pytest.raises(SandboxManagerError, match='no unbound WSB'):
+        manager.listener_binding(wsb_listeners_busy=True)
+    wsb.running.return_value = {'other-wsb'}
+    manager.listener_binding()
+    with pytest.raises(SandboxManagerError, match='no unbound WSB'):
+        manager.listener_binding(wsb_listeners_busy=True)
+
+
+def test_busy_ports_do_not_hide_occupancy_query_failure(allocation):
+    manager, session, wsb = allocation
+    manager.listener_binding()
+    manager.listener_binding(wsb_listeners_busy=True)
+    wsb.running.side_effect = OSError('unknown occupancy')
+    with pytest.raises(OSError, match='unknown occupancy'):
+        manager.start(session)
+    manager.micro.start.assert_not_called()
+
+
 @pytest.mark.parametrize("occupied", [False, True])
 def test_listener_plan_matches_actual_backend(allocation, occupied):
     manager, session, wsb = allocation
