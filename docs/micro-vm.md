@@ -70,6 +70,15 @@ Windows PowerShell 하위 프로세스 시험에서는 PSModulePath에 WindowsPo
 자동 배정은 listener 설정 전에 WSB 점유를 확인한다. 비었으면 0.0.0.0:17443/17444,
 점유됐으면 micro_VM용 loopback 동적 포트를 고른다. 시작 잠금 안에서 점유를 다시 확인하며,
 그 사이 변경되면 다른 backend로 이동하지 않고 시작을 거부한다. WSB 시작 잠금은 최대 10초 기다린다.
+
+2026-11-12 추가: Host가 고정 listener를 실제로 열다가 EADDRINUSE/WinError 10048을 확인한 경우,
+자신이 일부 열어 둔 listener만 닫고 `listener_binding(wsb_listeners_busy=True)`를 호출할 수 있다.
+아직 VM이 선택되지 않았고 직전 계획이 WSB일 때만 micro_VM용 loopback 동적 포트를 반환한다.
+이 계획은 WSB 부팅 전/종료 뒤에도 유지해 두 번째 Host가 고정 포트를 다시 사용하지 않게 한다.
+다른 프로세스를 종료하거나 포트를 강제로 회수하지 않는다. 접근 거부, 점유 조회 오류, VM 시작 후
+실패는 전환 사유가 아니다. Host #131과 함께 적용한다. `test_automatic.py`의 추가 4개 사례 및
+전체 Manager 테스트 264 passed / 1 skipped / 8 subtests passed로 검증했다. 다른 PC의 실제 VM
+부팅·파일 반출은 이 테스트 결과에 포함하지 않는다.
 실제 최초 WSB A는 Guest에 게시한 172.29.80.1로 READY가 됐고 이후 B/C는 서로 다른 micro_VM으로 연결됐다.
 
 `max_active`는 1..64 정수(기본 8)다. 협력하는 Host는 별도의 전역 micro_VM 시작 mutex 안에서
