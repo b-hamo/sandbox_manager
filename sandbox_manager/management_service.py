@@ -19,6 +19,7 @@ from pathlib import Path
 
 from . import config
 from .errors import INVALID_ARGUMENT, RUNTIME_UNAVAILABLE, SandboxManagerError
+from .transfer_limits import MAX_FILE_BYTES, check_service
 
 
 class ManagementService:
@@ -119,6 +120,12 @@ class ManagementService:
 
     def start(self, session):
         with self.lock:
+            # Check the live worker before creating a capability or starting a VM.
+            # A new binary beside an old worker must not look like an upgrade.
+            try:
+                check_service(self.exe)
+            except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+                raise SandboxManagerError(RUNTIME_UNAVAILABLE, str(error)) from error
             lease = self._lease(session)
             return self.rpc(session, "start", request_id=lease["start_request_id"])
 
@@ -157,8 +164,8 @@ class ManagementService:
                     name = path.relative_to(source).as_posix()
                     names.add(name)
                     before = path.stat()
-                    if before.st_size > 128 * 1024 * 1024:
-                        raise SandboxManagerError(INVALID_ARGUMENT, "service projection file exceeds 128 MiB")
+                    if before.st_size > MAX_FILE_BYTES:
+                        raise SandboxManagerError(INVALID_ARGUMENT, "service projection file exceeds 512 MiB")
                     # These reads execute in the ordinary Host, never as the High
                     # service. A concurrent replacement cannot expose privileged
                     # files that this caller could not already read.

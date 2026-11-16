@@ -18,13 +18,14 @@ from . import config
 from .builtin_apps import stage_notepad
 from .errors import SandboxManagerError
 from .programs import PROGRAMS, FoundProgram, check_program_root, find_program
+from .transfer_limits import MAX_FILE_BYTES, MAX_SESSION_BYTES
 
 ALIASES = {"메모장": "notepad", "notepad.exe": "notepad", "python3": "python",
            "python.exe": "python", "node.exe": "node", "powershell.exe": "powershell", "cmd.exe": "cmd"}
 SYSTEM_APPS = {"notepad": r"C:\Windows\System32\notepad.exe",
                "cmd": r"C:\Windows\System32\cmd.exe",
                "powershell": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"}
-MAX_BYTES = 512 * 1024 * 1024
+MAX_BYTES = MAX_SESSION_BYTES
 
 
 def installed_candidates(name):
@@ -67,7 +68,7 @@ def copy_program(source: Path, target: Path):
             path = Path(directory) / name
             before = path.stat()
             total += before.st_size
-            if len(rows) >= 60000 or total > MAX_BYTES or before.st_size > 128 * 1024 * 1024:
+            if len(rows) >= 60000 or total > MAX_BYTES or before.st_size > MAX_FILE_BYTES:
                 raise OSError("application copy exceeds session package limits")
             relative = path.relative_to(source)
             destination = target / relative
@@ -115,7 +116,7 @@ def bundle_program(source, staging, archive):
         for path in sorted(staging.rglob("*")):
             if path.is_file():
                 package.write(path, path.relative_to(staging).as_posix())
-    if temporary.stat().st_size > 128 * 1024 * 1024:
+    if temporary.stat().st_size > MAX_FILE_BYTES:
         raise OSError("application archive exceeds management transfer limit")
     digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
     archive.parent.mkdir(parents=True, exist_ok=True)

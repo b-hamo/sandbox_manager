@@ -110,3 +110,23 @@ startup_timeout_s는 1..3600초이며 Host --startup-timeout과 같은 값을 �
 이미지 준비 단계에서 실패한 경우 전체 workspace ID·세션 label·root 소유 SID와
 `runtime_creation=not_attempted`, `cleanup_confirmed=true`, 결과의 `cleaned_up=true`를 모두 확인해야
 VM 생성 없는 정리 완료로 인정한다. 누락되거나 다른 ID이면 stop을 추측해서 보내지 않는다.
+
+## 관리 전송 용량 (2026-11-16)
+
+이 변경의 배포 버전은 Manager **0.2.0**이며 micro_VM **0.3.0** 관리 서비스와 함께 사용한다.
+Host의 대응 설치 변경은 `b-hamo/host_control#152`, 관리 서비스 변경은 `b-hamo/micro_VM#14`다.
+세 저장소의 대응 PR이 반영된 소스로 배포해야 하며 기존 0.1.0 wheel을 재사용하지 않는다.
+
+앱 ZIP과 관리 전송 파일은 개별 512 MiB(536870912바이트), 앱 staging 합계는
+2 GiB(2147483648바이트)까지 허용한다. native 서비스는 세션의 게시 파일과 전송 중
+예약 용량을 합쳐 2 GiB로 제한한다. 파일 개수, SHA-256, 읽기 전용 공유, 소유권 검사와
+불확실한 작업의 재실행 금지는 유지한다. inbox와 결과 반출의 별도 한도는 변경하지 않는다.
+
+micro_VM 관리 서비스도 일치하는 버전으로 배포해야 한다. commit 해시 검사는 512 MiB를
+허용하고, 요청 기록은 2 GiB를 전달하는 32768개 64-KiB 청크와 기타 RPC를 수용해야 한다.
+소스 파일 수정만으로 실행 중인 Host 모듈이 다시 로드되거나 FAILED 준비 상태가
+초기화되지 않는다. 재시도를 위해 기존 실패 기록을 지우지 않는다.
+현재 설치 경로는 유휴 상태의 서비스 업그레이드만 지원한다. worker를 유지하면 이전
+바이너리의 한도가 유지되므로 이 변경은 실행 중 세션에 즉시 적용되지 않는다.
+
+새 설치는 Manager의 transfer_limits와 실행 중인 관리 서비스의 health.transfer_limits가 일치해야 한다. start 이전에 읽기 전용 health 검사를 수행하며, 예전 서비스는 세션 생성 없이 거부한다. GCC는 명시 후보, MSYS2 UCRT64/MINGW64, PATH 순으로 검사하고 x64 MinGW-w64 구조 및 Windows 헤더가 없는 구형 MinGW를 거부한다. Host에서 GCC를 실행하여 탐색하지 않는다.

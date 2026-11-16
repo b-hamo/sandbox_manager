@@ -137,12 +137,23 @@ def find_program(name: str, *, which=shutil.which, check=None, candidates=()) ->
         raise SandboxManagerError(INVALID_ARGUMENT, f"{name!r} cannot be shared; known: {sorted(PROGRAMS)}")
     check = check or (lambda found: found)
     refused = None
-    for c in [which(spec.exe.removesuffix(".exe"))] + list(candidates) + list(spec.known):
+    # GCC on PATH can be legacy MinGW (no -municode / WinHTTP SDK). Prefer
+    # explicitly supplied roots, then MSYS2 UCRT64/MINGW64, before PATH.
+    choices = (list(candidates) + list(spec.known) + [which("gcc")] if name == "gcc"
+               else [which(spec.exe.removesuffix(".exe"))] + list(candidates) + list(spec.known))
+    for c in choices:
         found = _candidate(name, c)
         if found is None:
             continue
         try:
-            return check(found)
+            found = check(found)
+            if name == "gcc":
+                headers = found.root / "include"
+                target = found.root / "lib" / "gcc" / "x86_64-w64-mingw32"
+                if not all((headers / h).is_file() for h in ("_mingw.h", "winhttp.h")) or not target.is_dir():
+                    raise SandboxManagerError(INVALID_ARGUMENT,
+                        f"{found.root}: GCC requires a complete x64 MinGW-w64 toolchain (MSYS2 UCRT64 recommended); legacy MinGW is not selected")
+            return found
         except SandboxManagerError as e:
             refused = refused or e
     if refused is not None:
