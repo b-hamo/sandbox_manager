@@ -24,7 +24,17 @@ def client(tmp_path):
 SESSION = "SES-" + "1" * 32
 
 
+def test_old_worker_refused_before_creating_session(client, monkeypatch):
+    monkeypatch.setattr('sandbox_manager.management_service.check_service', Mock(side_effect=ValueError('contract mismatch')))
+    client.rpc = Mock()
+    with pytest.raises(SandboxManagerError, match='contract mismatch'):
+        client.start(SESSION)
+    client.rpc.assert_not_called()
+    assert not client.leases and not list(client.state.glob('*.json'))
+
+
 def test_start_uses_persisted_request_and_capability(client, monkeypatch):
+    monkeypatch.setattr('sandbox_manager.management_service.check_service', lambda exe: {})
     sent = []
     def run(args, **kwargs):
         sent.append(json.loads(kwargs["input"]))
@@ -39,6 +49,7 @@ def test_start_uses_persisted_request_and_capability(client, monkeypatch):
 
 
 def test_timeout_never_reissues_request(client, monkeypatch):
+    monkeypatch.setattr('sandbox_manager.management_service.check_service', lambda exe: {})
     run = Mock(side_effect=subprocess.TimeoutExpired("management-client", 45))
     monkeypatch.setattr(subprocess, "run", run)
     with pytest.raises(SandboxManagerError, match="not replayed"):
@@ -96,6 +107,34 @@ def test_projection_error_stops_instead_of_replaying(client):
     client.rpc = Mock()
     with pytest.raises(SandboxManagerError, match="uncertain update"):
         client.sync(SESSION)
+    client.rpc.assert_not_called()
+
+
+@pytest.mark.parametrize("size,accepted", [(128 * 1024 * 1024 + 1, True),
+                                          (512 * 1024 * 1024, True),
+                                          (512 * 1024 * 1024 + 1, False)])
+def test_projection_size_gate_before_reading_or_sending(client, monkeypatch, size, accepted):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from sandbox_manager import management_service
+    source, file = Mock(), Mock()
+    source.rglob.return_value = [file]
+    file.is_file.return_value = True
+    file.name = "large.zip"
+    file.relative_to.return_value = Path("large.zip")
+    file.stat.return_value = SimpleNamespace(st_size=size)
+    file.read_bytes.side_effect = RuntimeError("read reached")
+    client.mappings[(SESSION, "package")] = source
+    client.rpc = Mock()
+    monkeypatch.setattr(management_service.config, "check_contents", lambda path: None)
+    if accepted:
+        with pytest.raises(RuntimeError, match="read reached"):
+            client.sync(SESSION)
+        file.read_bytes.assert_called_once()
+    else:
+        with pytest.raises(SandboxManagerError, match="512 MiB"):
+            client.sync(SESSION)
+        file.read_bytes.assert_not_called()
     client.rpc.assert_not_called()
 
 

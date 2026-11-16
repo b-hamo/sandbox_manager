@@ -12,6 +12,7 @@ from sandbox_manager.app_preparation import prepare_apps, copy_program, verify_a
 from sandbox_manager.errors import SandboxManagerError
 from sandbox_manager.manager import SandboxSession
 from sandbox_manager.programs import FoundProgram
+from sandbox_manager.transfer_limits import MAX_FILE_BYTES, MAX_SESSION_BYTES
 
 
 @pytest.fixture
@@ -84,6 +85,51 @@ def test_host_path_is_not_an_application_recipe(setup):
     result = prepare_apps(manager, session, [r"C:\Users\private.exe"])
     assert result["apps"][0]["status"] == "UNSUPPORTED"
     manager._app_guest_exit.assert_not_called()
+
+
+def test_management_limits_and_guest_extraction_budget(tmp_path):
+    from sandbox_manager import app_preparation
+    assert MAX_FILE_BYTES == 536870912
+    assert MAX_SESSION_BYTES == 2147483648
+    assert app_preparation.MAX_BYTES == MAX_SESSION_BYTES
+    script = unpack_and_link("archive", "digest", "source", "target", "exe")
+    assert str(MAX_SESSION_BYTES + 16777216) in script
+
+
+def test_copy_file_boundary_and_total_boundary(tmp_path, monkeypatch):
+    from sandbox_manager import app_preparation
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tool.exe").write_bytes(b"123")
+    monkeypatch.setattr(app_preparation, "MAX_FILE_BYTES", 3)
+    monkeypatch.setattr(app_preparation, "MAX_BYTES", 3)
+    assert len(copy_program(source, tmp_path / "at-boundary")) == 1
+    (source / "tool.exe").write_bytes(b"1234")
+    with pytest.raises(OSError, match="session package limits"):
+        copy_program(source, tmp_path / "file-too-large")
+    (source / "tool.exe").write_bytes(b"123")
+    (source / "dependency.dll").write_bytes(b"1")
+    with pytest.raises(OSError, match="session package limits"):
+        copy_program(source, tmp_path / "total-too-large")
+
+
+def test_archive_exact_boundary_is_published_but_extra_byte_is_not(tmp_path, monkeypatch):
+    from sandbox_manager import app_preparation
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tool.exe").write_bytes(b"fixture")
+    first = tmp_path / "published" / "first.zip"
+    bundle_program(source, tmp_path / "first", first)
+    size = first.stat().st_size
+    monkeypatch.setattr(app_preparation, "MAX_FILE_BYTES", size)
+    exact = tmp_path / "published" / "exact.zip"
+    bundle_program(source, tmp_path / "exact-staging", exact)
+    assert exact.stat().st_size == size
+    monkeypatch.setattr(app_preparation, "MAX_FILE_BYTES", size - 1)
+    rejected = tmp_path / "published" / "not-published.zip"
+    with pytest.raises(OSError, match="management transfer limit"):
+        bundle_program(source, tmp_path / "oversized-staging", rejected)
+    assert not rejected.exists()
 
 
 @pytest.mark.skipif(not shutil.which("powershell.exe"), reason="Windows PowerShell 5.1")
