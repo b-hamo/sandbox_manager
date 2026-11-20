@@ -11,6 +11,7 @@ import os
 from .errors import RUNTIME_UNAVAILABLE, SandboxManagerError
 
 MUTEX_NAME = r"Global\SCRP.WindowsSandbox.Start.v1"
+MAX_WAIT_MS = 120000   # a Windows Sandbox start holds the slot about 35-40 s (2026-11-20 log)
 
 
 @contextmanager
@@ -27,8 +28,8 @@ def micro_vm_slot(wait_ms=10000):
 
 @contextmanager
 def _allocation_slot(name, wait_ms):
-    if type(wait_ms) is not int or not 0 <= wait_ms <= 30000:
-        raise ValueError("allocation wait must be 0..30000 milliseconds")
+    if type(wait_ms) is not int or not 0 <= wait_ms <= MAX_WAIT_MS:
+        raise ValueError(f"allocation wait must be 0..{MAX_WAIT_MS} milliseconds")
     if os.name != "nt":
         raise SandboxManagerError(RUNTIME_UNAVAILABLE, "Windows Sandbox allocation requires Windows")
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
