@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from sandbox_manager.automatic import AutomaticVmManager
+from sandbox_manager.automatic import AutomaticVmManager, SLOT_WAIT_MS
 from sandbox_manager.errors import SandboxManagerError
 from sandbox_manager.manager import SandboxSession, PREPARED
 
@@ -25,7 +25,7 @@ def allocation(tmp_path, monkeypatch):
     held = []
     @contextmanager
     def slot(wait_ms=0):
-        assert wait_ms == 10000
+        assert wait_ms == SLOT_WAIT_MS == 90000   # a WSB start holds the slot ~40 s
         held.append(True)
         try: yield
         finally: held.pop()

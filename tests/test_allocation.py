@@ -48,3 +48,12 @@ def test_another_thread_is_rejected_and_failure_releases_lock():
             raise RuntimeError("injected start failure")
     with windows_sandbox_slot():
         pass
+
+
+def test_allocation_wait_allows_a_whole_sandbox_start():
+    # A Windows Sandbox start holds the slot about 40 s; 90 s must be accepted, more than 120 s not.
+    from sandbox_manager.allocation import MAX_WAIT_MS, _allocation_slot
+    assert MAX_WAIT_MS == 120000
+    with pytest.raises(ValueError):
+        with _allocation_slot(r"Global\SCRP.Test.Wait", MAX_WAIT_MS + 1):
+            pass

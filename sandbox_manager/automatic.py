@@ -8,6 +8,12 @@ from .errors import INVALID_ARGUMENT, RUNTIME_UNAVAILABLE, SandboxManagerError
 from .manager import SandboxManager, PREPARED, _locked
 from .micro_vm import MicroVmManager
 
+# Another Host starting Windows Sandbox holds the machine slot for its whole start
+# (about 35-40 s on 2026-11-20). Waiting only 10 s made a second conversation's
+# task_submit fail with "another Host is allocating a VM"; 90 s stays inside the
+# Codex tool timeout (120 s) and still refuses rather than waiting forever.
+SLOT_WAIT_MS = 90000
+
 
 class AutomaticVmManager(SandboxManager):
     fixed_vm_binding = True
@@ -45,7 +51,7 @@ class AutomaticVmManager(SandboxManager):
             return {"host": "127.0.0.1", "port": 0, "upload_port": 0}
         if self._listener_ports_busy:
             return {"host": "127.0.0.1", "port": 0, "upload_port": 0}
-        with windows_sandbox_slot(wait_ms=10000):
+        with windows_sandbox_slot(wait_ms=SLOT_WAIT_MS):
             self._listener_binding = "MICRO_VM_APP_WINDOW" if self.wsb.running() else "WINDOWS_SANDBOX"
         if self._listener_binding == "WINDOWS_SANDBOX":
             return {"host": "0.0.0.0", "port": 17443, "upload_port": 17444}
@@ -69,7 +75,7 @@ class AutomaticVmManager(SandboxManager):
             raise SandboxManagerError(RUNTIME_UNAVAILABLE, "runtime already selected; automatic reassignment refused")
         # Query/access failures propagate. Positive WSB or listener occupancy
         # selects micro_VM before boot; a failed WSB start never triggers fallback.
-        with windows_sandbox_slot(wait_ms=10000):
+        with windows_sandbox_slot(wait_ms=SLOT_WAIT_MS):
             occupied = self.wsb.running()
             selected = "MICRO_VM_APP_WINDOW" if occupied or self._listener_ports_busy else "WINDOWS_SANDBOX"
             if self._listener_binding is not None and self._listener_binding != selected:
